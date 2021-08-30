@@ -1,8 +1,6 @@
-module github.com/ysicing/caddy2-bancn
+module github.com/ysicing/chinaip
 
 go 1.17
-
-require github.com/caddyserver/caddy/v2 v2.4.3
 
 require (
 	github.com/AndreasBriese/bbloom v0.0.0-20190825152654-46b345b51c96 // indirect
@@ -12,6 +10,7 @@ require (
 	github.com/Masterminds/sprig/v3 v3.2.2 // indirect
 	github.com/antlr/antlr4 v0.0.0-20200503195918-621b933c7a7f // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
+	github.com/caddyserver/caddy/v2 v2.4.3
 	github.com/caddyserver/certmagic v0.14.3 // indirect
 	github.com/cespare/xxhash v1.1.0 // indirect
 	github.com/cespare/xxhash/v2 v2.1.2 // indirect
@@ -47,7 +46,7 @@ require (
 	github.com/miekg/dns v1.1.43 // indirect
 	github.com/mitchellh/copystructure v1.0.0 // indirect
 	github.com/mitchellh/reflectwalk v1.0.0 // indirect
-	github.com/oschwald/geoip2-golang v1.5.0 // indirect
+	github.com/oschwald/geoip2-golang v1.5.0
 	github.com/oschwald/maxminddb-golang v1.8.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/prometheus/client_golang v1.11.0 // indirect
@@ -70,7 +69,7 @@ require (
 	go.step.sm/crypto v0.8.0 // indirect
 	go.uber.org/atomic v1.9.0 // indirect
 	go.uber.org/multierr v1.7.0 // indirect
-	go.uber.org/zap v1.19.0 // indirect
+	go.uber.org/zap v1.19.0
 	golang.org/x/crypto v0.0.0-20210513164829-c07d793c2f9a // indirect
 	golang.org/x/net v0.0.0-20210525063256-abc453219eb5 // indirect
 	golang.org/x/sys v0.0.0-20210603081109-ebe580a85c40 // indirect

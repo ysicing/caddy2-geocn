@@ -5,7 +5,9 @@
 		    roll_keep 5
 		    roll_keep_for 1h
         }
-        format console
+        format console {
+            time_format "iso8601"
+        }
     }
 }
 
@@ -22,7 +24,11 @@
     import LOG
     metrics /metrics
     # respond "Goodbye, world!"
-    route {
-        visitor_ip stdout
+    @geocn {
+        chinaip {
+            db_file "./Country.mmdb"
+        }
     }
+    redir @geocn https://www.baidu.com${url} permanent
+    respond "666"
 }

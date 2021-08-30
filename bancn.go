@@ -1,118 +1,131 @@
-package caddy2bancn
+package chinaip
 
 import (
-	"net"
-	"net/http"
-
+	"fmt"
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
-	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/oschwald/geoip2-golang"
+	"go.uber.org/zap"
+	"net"
+	"net/http"
 )
 
 var (
-	_ caddyhttp.MiddlewareHandler = (*BanCN)(nil)
-	_ caddyfile.Unmarshaler       = (*BanCN)(nil)
+	_ caddy.Module             = (*CNGeoIP)(nil)
+	_ caddyhttp.RequestMatcher = (*CNGeoIP)(nil)
+	_ caddy.Provisioner        = (*CNGeoIP)(nil)
+	_ caddy.CleanerUpper       = (*CNGeoIP)(nil)
+	_ caddyfile.Unmarshaler    = (*CNGeoIP)(nil)
 )
 
 func init() {
-	caddy.RegisterModule(BanCN{})
-	httpcaddyfile.RegisterHandlerDirective("chinaip", parseCaddyfileHandle)
-
+	caddy.RegisterModule(CNGeoIP{})
 }
 
-type BanCN struct {
-	Header string
-	DBFile string
+type CNGeoIP struct {
+	DBFile   string `json:"db_file"`
+	dbReader *geoip2.Reader
+	logger   *zap.Logger
 }
 
-func (BanCN) CaddyModule() caddy.ModuleInfo {
+func (CNGeoIP) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
-		ID:  "http.handlers.chinaip",
-		New: func() caddy.Module { return new(BanCN) },
+		ID:  "http.matchers.chinaip",
+		New: func() caddy.Module { return new(CNGeoIP) },
 	}
 }
 
-// parseCaddyfileHandle unmarshals tokens from h into a new Middleware.
-func parseCaddyfileHandle(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
-	var m BanCN
-	err := m.UnmarshalCaddyfile(h.Dispenser)
-	if err != nil {
-		return nil, err
-	}
-	return m, err
-}
-
-func parseStringArg(d *caddyfile.Dispenser, out *string) error {
-	if !d.Args(out) {
-		return d.ArgErr()
-	}
-	return nil
-}
-
-func (m *BanCN) validSource(addr string) bool {
-	ip := net.ParseIP(addr)
+func (m *CNGeoIP) validSource(ip net.IP) bool {
 	if ip == nil {
 		return false
 	}
-	db, err := geoip2.Open(m.DBFile)
-	if err != nil {
+	m.logger.Debug("valid ip", zap.String("ip", ip.String()))
+	// 内网ip
+	if !checkip(ip) {
 		return false
 	}
-	defer db.Close()
-	record, err := db.Country(ip)
+	record, err := m.dbReader.Country(ip)
 	if err != nil || record == nil {
 		return false
 	}
 	return record.Country.IsoCode == "CN"
 }
 
-// func (m *BanCN) Provision(ctx caddy.Context) error {
-// 	switch m.Output {
-// 	case "stdout":
-// 		m.w = os.Stdout
-// 	case "stderr":
-// 		m.w = os.Stderr
-// 	default:
-// 		return fmt.Errorf("an output stream is required")
-// 	}
-// 	return nil
-// }
-
-// func (m *BanCN) Validate() error {
-// 	if m.w == nil {
-// 		return fmt.Errorf("no writer")
-// 	}
-// 	return nil
-// }
-
-// ServeHTTP implements caddyhttp.MiddlewareHandler.
-func (m BanCN) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
+func (m *CNGeoIP) Provision(ctx caddy.Context) error {
+	var err error
+	m.dbReader, err = geoip2.Open(m.DBFile)
+	m.logger = ctx.Logger(m)
+	m.logger.Debug("provision ", zap.String("geodb file", m.DBFile))
 	if err != nil {
-		return next.ServeHTTP(w, r)
+		return fmt.Errorf("cannot  open geodb file %v: %v", m.DBFile, err)
 	}
-	if hVal := r.Header.Get(m.Header); hVal != "" {
+	return nil
+}
 
+func (m *CNGeoIP) Cleanup() error {
+	if m.dbReader != nil {
+		return m.dbReader.Close()
 	}
-	return next.ServeHTTP(w, r)
+	return nil
 }
 
 // UnmarshalCaddyfile implements caddyfile.Unmarshaler.
-func (m *BanCN) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
-	d.NextArg()
-	for d.NextBlock(0) {
-		var err error
-		switch d.Val() {
-		case "header":
-			err = parseStringArg(d, &m.Header)
-		default:
-			return d.Errf("unknown chinaip arg")
-		}
-		if err != nil {
-			return d.Errf("error parsing %s: %s", d.Val(), err)
+func (m *CNGeoIP) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	crt := 0
+	for d.Next() {
+		for n := d.Nesting(); d.NextBlock(n); {
+			switch d.Val() {
+			case "db_file":
+				crt = 1
+			default:
+				switch crt {
+				case 1:
+					m.DBFile = d.Val()
+					crt = 0
+				}
+			}
 		}
 	}
+	if len(m.DBFile) == 0 {
+		m.DBFile = "/etc/caddy/Country.mmdb"
+	}
 	return nil
+}
+
+func checkip(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsLinkLocalMulticast() || ip.IsLinkLocalUnicast() {
+		return false
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		switch true {
+		case ip4[0] == 10:
+			return false
+		case ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31:
+			return false
+		case ip4[0] == 192 && ip4[1] == 168:
+			return false
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+func (m *CNGeoIP) Match(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		m.logger.Warn("cannot split IP address", zap.String("address", r.RemoteAddr), zap.Error(err))
+	}
+	addr := net.ParseIP(host)
+	// 中国公网ip
+	if m.validSource(addr) {
+		m.logger.Info("")
+		return true
+	}
+	if hVal := r.Header.Get("X-Forwarded-For"); hVal != "" {
+		xhost := net.ParseIP(hVal)
+		return m.validSource(xhost)
+	}
+	return false
 }
