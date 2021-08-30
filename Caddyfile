@@ -1,0 +1,28 @@
+(LOG) {
+    log {
+        output file ./caddy.log {
+            roll_size 1mb
+		    roll_keep 5
+		    roll_keep_for 1h
+        }
+        format console
+    }
+}
+
+(COMCFG) {
+    encode zstd gzip
+}
+
+{
+    debug
+}
+
+:2021 {
+    import COMCFG
+    import LOG
+    metrics /metrics
+    # respond "Goodbye, world!"
+    route {
+        visitor_ip stdout
+    }
+}
