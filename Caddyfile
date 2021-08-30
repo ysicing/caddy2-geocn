@@ -24,11 +24,11 @@
     import LOG
     metrics /metrics
     # respond "Goodbye, world!"
-    @geocn {
-        chinaip {
+    @geofilter {
+        geocn {
             db_file "./Country.mmdb"
         }
     }
-    redir @geocn https://www.baidu.com${url} permanent
+    redir @geofilter https://www.baidu.com${url} permanent
     respond "666"
 }

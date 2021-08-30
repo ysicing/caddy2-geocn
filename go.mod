@@ -1,4 +1,4 @@
-module github.com/ysicing/chinaip
+module github.com/ysicing/caddy2-geocn
 
 go 1.17
 

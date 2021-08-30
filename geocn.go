@@ -1,4 +1,4 @@
-package chinaip
+package caddy2_geocn
 
 import (
 	"fmt"
@@ -31,7 +31,7 @@ type CNGeoIP struct {
 
 func (CNGeoIP) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
-		ID:  "http.matchers.chinaip",
+		ID:  "http.matchers.geocn",
 		New: func() caddy.Module { return new(CNGeoIP) },
 	}
 }
