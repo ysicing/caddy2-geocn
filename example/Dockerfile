@@ -1,4 +1,4 @@
-FROM ghcr-proxy.hk1.godu.dev/ysicing/debian
+FROM ghcr.io/ysicing/debian
 
 RUN mkdir -p /etc/caddy
 
