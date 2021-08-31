@@ -10,6 +10,6 @@ COPY example/Caddyfile /etc/caddy/Caddyfile
 
 COPY example/allow /etc/caddy/example/allow
 
-COPY example/deny /etc/caddy/example/example/deny
+COPY example/deny /etc/caddy/example/deny
 
 CMD caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
