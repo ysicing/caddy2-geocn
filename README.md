@@ -16,5 +16,10 @@ xcaddy build --with github.com/ysicing/caddy2-geocn
             db_file "./Country.mmdb"
         }
     }
-    redir @geofilter https://www.baidu.com${url} permanent
+    file_server @geofilter {
+        # TODO
+    }
+    file_server {
+        # TODO
+    }
 ```

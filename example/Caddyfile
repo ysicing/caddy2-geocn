@@ -1,6 +1,6 @@
 (LOG) {
     log {
-        output file ./caddy.log {
+        output file /var/log/caddy.log {
             roll_size 1mb
 		    roll_keep 5
 		    roll_keep_for 1h
@@ -19,20 +19,19 @@
     debug
 }
 
-:2021 {
+:80 {
     import COMCFG
     import LOG
     metrics /metrics
-    # respond "Goodbye, world!"
     @geofilter {
         geocn {
-            db_file "./Country.mmdb"
+            db_file "/etc/caddy/Country.mmdb"
         }
     }
     file_server @geofilter {
-        root ./example/deny
+        root /etc/caddy/example/deny
     }
     file_server {
-        root ./example/allow
+        root /etc/caddy/example/allow
     }
 }
