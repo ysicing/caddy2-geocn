@@ -11,6 +11,14 @@ jobs:
     - uses: actions/checkout@v1
       with:
         fetch-depth: 1
+    - name: Install Go
+      uses: actions/setup-go@v1
+      with:
+        go-version: 1.17.x
+    - name: install xcaddy
+      run: |
+          echo "install xcaddy"
+          go get -u github.com/caddyserver/xcaddy/cmd/xcaddy@latest
     - name: Login GHCR
       uses: docker/login-action@v1
       with:
@@ -19,8 +27,9 @@ jobs:
         password: ${{ secrets.GHCRIO }}
     - name: build bin
       run: |
-        echo "构建二进制"
-        make build
+        export TZ='Asia/Shanghai'
+        export PATH=$PATH:$(go env GOPATH)/bin
+        xcaddy build --with github.com/ysicing/caddy2-geocn
         rm -rf Country.mmdb
         wget https://github.com/Hackl0us/GeoIP2-CN/raw/release/Country.mmdb
         docker build -t ghcr.io/ysicing/caddy2-geocn -f example/Dockerfile .
