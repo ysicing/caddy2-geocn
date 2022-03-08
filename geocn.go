@@ -1,4 +1,4 @@
-package caddy2_geocn
+package geocn
 
 import (
 	"fmt"
