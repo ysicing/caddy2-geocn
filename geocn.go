@@ -2,13 +2,14 @@ package caddy2_geocn
 
 import (
 	"fmt"
+	"net"
+	"net/http"
+
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/oschwald/geoip2-golang"
 	"go.uber.org/zap"
-	"net"
-	"net/http"
 )
 
 var (
@@ -94,22 +95,16 @@ func (m *CNGeoIP) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 }
 
 func checkip(ip net.IP) bool {
-	if ip.IsLoopback() || ip.IsLinkLocalMulticast() || ip.IsLinkLocalUnicast() {
+	// 127.0.0.0/8
+	// 224.0.0.0/4
+	// 169.254.0.0/16
+	// 10.0.0.0/8
+	// 172.16.0.0/12
+	// 192.168.0.0/16
+	if ip.IsLoopback() || ip.IsLinkLocalMulticast() || ip.IsLinkLocalUnicast() || ip.IsPrivate() {
 		return false
 	}
-	if ip4 := ip.To4(); ip4 != nil {
-		switch true {
-		case ip4[0] == 10:
-			return false
-		case ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31:
-			return false
-		case ip4[0] == 192 && ip4[1] == 168:
-			return false
-		default:
-			return true
-		}
-	}
-	return false
+	return true
 }
 
 func (m *CNGeoIP) Match(r *http.Request) bool {
@@ -120,7 +115,6 @@ func (m *CNGeoIP) Match(r *http.Request) bool {
 	addr := net.ParseIP(host)
 	// 中国公网ip
 	if m.validSource(addr) {
-		m.logger.Info("")
 		return true
 	}
 	if hVal := r.Header.Get("X-Forwarded-For"); hVal != "" {
