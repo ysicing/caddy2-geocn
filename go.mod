@@ -4,7 +4,7 @@ go 1.17
 
 require (
 	github.com/caddyserver/caddy/v2 v2.4.6
-	github.com/oschwald/geoip2-golang v1.6.1
+	github.com/oschwald/geoip2-golang v1.7.0
 	go.uber.org/zap v1.21.0
 )
 
@@ -58,7 +58,7 @@ require (
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
 	github.com/nxadm/tail v1.4.8 // indirect
 	github.com/onsi/ginkgo v1.16.4 // indirect
-	github.com/oschwald/maxminddb-golang v1.8.0 // indirect
+	github.com/oschwald/maxminddb-golang v1.9.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/prometheus/client_golang v1.12.1 // indirect
 	github.com/prometheus/client_model v0.2.0 // indirect
@@ -87,7 +87,7 @@ require (
 	golang.org/x/crypto v0.0.0-20220307211146-efcb8507fb70 // indirect
 	golang.org/x/mod v0.5.1 // indirect
 	golang.org/x/net v0.0.0-20220225172249-27dd8689420f // indirect
-	golang.org/x/sys v0.0.0-20220307203707-22a9840ba4d7 // indirect
+	golang.org/x/sys v0.0.0-20220325203850-36772127a21f // indirect
 	golang.org/x/term v0.0.0-20210927222741-03fcf44c2211 // indirect
 	golang.org/x/text v0.3.7 // indirect
 	golang.org/x/tools v0.1.9 // indirect
