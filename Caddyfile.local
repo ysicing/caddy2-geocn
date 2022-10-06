@@ -30,9 +30,9 @@
         }
     }
     file_server @geofilter {
-        root ./example/deny
+        root ./docker/example/deny
     }
     file_server {
-        root ./example/allow
+        root ./docker/example/allow
     }
 }
