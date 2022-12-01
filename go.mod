@@ -5,7 +5,7 @@ go 1.19
 require (
 	github.com/caddyserver/caddy/v2 v2.6.2
 	github.com/oschwald/geoip2-golang v1.8.0
-	go.uber.org/zap v1.23.0
+	go.uber.org/zap v1.24.0
 )
 
 require (
