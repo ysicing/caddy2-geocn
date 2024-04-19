@@ -1,0 +1,36 @@
+# https://taskfile.dev
+
+version: '3'
+
+vars:
+  GREETING: Hello, World!
+
+tasks:
+
+  mmdb:
+    run: once
+    status:
+      - test -f ./Country.mmdb
+    cmds:
+      - wget https://github.com/Hackl0us/GeoIP2-CN/raw/release/Country.mmdb
+
+  build:
+    deps:
+      - mmdb
+    cmds:
+      - go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+      - xcaddy build --with github.com/ysicing/caddy2-geocn=../caddy2-geocn
+
+  run:
+    status:
+      - test -f ./Country.mmdb
+      - test -f ./caddy
+    cmds:
+      - task: build
+      - ./caddy run --config ./Caddyfile --adapter caddyfile
+
+
+  default:
+    cmds:
+      - rm -rf ./Country.mmdb ./caddy
+      - task: build

@@ -101,7 +101,7 @@ func checkip(ip net.IP) bool {
 	// 10.0.0.0/8
 	// 172.16.0.0/12
 	// 192.168.0.0/16
-	if ip.IsLoopback() || ip.IsLinkLocalMulticast() || ip.IsLinkLocalUnicast() || ip.IsPrivate() {
+	if ip.IsLoopback() || ip.IsLinkLocalMulticast() || ip.IsLinkLocalUnicast() || ip.IsPrivate() || ip.IsGlobalUnicast() {
 		return false
 	}
 	return true

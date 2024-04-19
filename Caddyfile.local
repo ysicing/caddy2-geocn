@@ -2,8 +2,8 @@
     log {
         output file ./caddy.log {
             roll_size 1mb
-		    roll_keep 5
-		    roll_keep_for 1h
+            roll_keep 5
+            roll_keep_for 1h
         }
         format console {
             time_format "iso8601"
@@ -19,11 +19,10 @@
     debug
 }
 
-:2021 {
+:2024 {
     import COMCFG
     import LOG
     metrics /metrics
-    # respond "Goodbye, world!"
     @geofilter {
         geocn {
             db_file "./Country.mmdb"
