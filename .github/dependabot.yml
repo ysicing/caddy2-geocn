@@ -1,9 +1,10 @@
 version: 2
 updates:
-  - package-ecosystem: gomod
-    directory: /
-    schedule:
-      interval: daily
+  # waiting caddy new release
+  # - package-ecosystem: gomod
+  #   directory: /
+  #   schedule:
+  #     interval: daily
   - package-ecosystem: github-actions
     directory: /
     schedule:
