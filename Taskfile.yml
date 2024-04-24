@@ -19,7 +19,14 @@ tasks:
       - mmdb
     cmds:
       - go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
-      - xcaddy build --with github.com/ysicing/caddy2-geocn=../caddy2-geocn
+      - xcaddy build
+          --with github.com/ysicing/caddy2-geocn=../caddy2-geocn
+          --with github.com/caddy-dns/cloudflare
+          --with github.com/caddy-dns/tencentcloud
+          --with github.com/caddy-dns/alidns
+          --with github.com/caddy-dns/dnspod
+          --with github.com/WeidiDeng/caddy-cloudflare-ip
+      - ./caddy list-modules
 
   run:
     status:
@@ -27,7 +34,7 @@ tasks:
       - test -f ./caddy
     cmds:
       - task: build
-      - ./caddy run --config ./Caddyfile --adapter caddyfile
+      - ./caddy run --config ./Caddyfile.local --adapter caddyfile
 
 
   default:
