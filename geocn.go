@@ -1,9 +1,13 @@
 package geocn
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"os"
+	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -20,12 +24,25 @@ var (
 	_ caddyfile.Unmarshaler    = (*CNGeoIP)(nil)
 )
 
+const (
+	remotefile = "https://github.com/Hackl0us/GeoIP2-CN/raw/release/Country.mmdb"
+)
+
 func init() {
 	caddy.RegisterModule(CNGeoIP{})
 }
 
 type CNGeoIP struct {
-	DBFile   string `json:"db_file"`
+	// refresh Interval
+	Interval caddy.Duration `json:"interval,omitempty"`
+	// request Timeout
+	Timeout caddy.Duration `json:"timeout,omitempty"`
+	// GeoIP2-CN remotefile
+	RemoteFile string `json:"georemote,omitempty"`
+	// GeoIP2-CN localfile
+	GeoFile string `json:"geolocal,omitempty"`
+
+	ctx      caddy.Context
 	dbReader *geoip2.Reader
 	logger   *zap.Logger
 }
@@ -35,6 +52,14 @@ func (CNGeoIP) CaddyModule() caddy.ModuleInfo {
 		ID:  "http.matchers.geocn",
 		New: func() caddy.Module { return new(CNGeoIP) },
 	}
+}
+
+// getContext returns a cancelable context, with a timeout if configured.
+func (s *CNGeoIP) getContext() (context.Context, context.CancelFunc) {
+	if s.Timeout > 0 {
+		return context.WithTimeout(s.ctx, time.Duration(s.Timeout))
+	}
+	return context.WithCancel(s.ctx)
 }
 
 func (m *CNGeoIP) validSource(ip net.IP) bool {
@@ -54,14 +79,88 @@ func (m *CNGeoIP) validSource(ip net.IP) bool {
 }
 
 func (m *CNGeoIP) Provision(ctx caddy.Context) error {
-	var err error
-	m.dbReader, err = geoip2.Open(m.DBFile)
+	m.ctx = ctx
 	m.logger = ctx.Logger(m)
-	m.logger.Debug("provision ", zap.String("geodb file", m.DBFile))
-	if err != nil {
-		return fmt.Errorf("cannot  open geodb file %v: %v", m.DBFile, err)
+
+	// 检查 RemoteFile 是否为空
+	if m.RemoteFile == "" {
+		m.RemoteFile = remotefile
 	}
+
+	// 下载并加载文件
+	if err := m.updateGeoFile(); err != nil {
+		return err
+	}
+
+	// 如果设置了更新间隔，启动定时更新
+	if m.Interval > 0 {
+		go m.periodicUpdate()
+	}
+
 	return nil
+}
+
+func (m *CNGeoIP) updateGeoFile() error {
+	// 下载文件
+	if err := m.downloadFile(); err != nil {
+		return fmt.Errorf("download file %v: %v", m.RemoteFile, err)
+	}
+
+	// 如果已存在 Reader，先关闭
+	if m.dbReader != nil {
+		m.dbReader.Close()
+	}
+
+	// 加载新文件
+	var err error
+	m.dbReader, err = geoip2.Open(m.GeoFile)
+	if err != nil {
+		return fmt.Errorf("open geodb file %v: %v", m.GeoFile, err)
+	}
+
+	m.logger.Debug("update geodb file", zap.String("geodb file", m.GeoFile), zap.String("remote file", m.RemoteFile))
+	return nil
+}
+
+func (m *CNGeoIP) downloadFile() error {
+	ctx, cancel := m.getContext()
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.RemoteFile, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download file %v: %v", m.RemoteFile, resp.StatusCode)
+	}
+
+	out, err := os.Create(m.GeoFile)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, resp.Body)
+	return err
+}
+
+func (m *CNGeoIP) periodicUpdate() {
+	if m.Interval == 0 {
+		m.Interval = caddy.Duration(time.Hour * 12)
+	}
+	ticker := time.NewTicker(time.Duration(m.Interval))
+	defer ticker.Stop()
+
+	for range ticker.C {
+		if err := m.updateGeoFile(); err != nil {
+			m.logger.Error("periodic update geodb file", zap.Error(err))
+		}
+	}
 }
 
 func (m *CNGeoIP) Cleanup() error {
@@ -73,23 +172,47 @@ func (m *CNGeoIP) Cleanup() error {
 
 // UnmarshalCaddyfile implements caddyfile.Unmarshaler.
 func (m *CNGeoIP) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
-	crt := 0
 	for d.Next() {
 		for n := d.Nesting(); d.NextBlock(n); {
 			switch d.Val() {
-			case "db_file":
-				crt = 1
-			default:
-				switch crt {
-				case 1:
-					m.DBFile = d.Val()
-					crt = 0
+			case "interval":
+				if !d.NextArg() {
+					return d.ArgErr()
 				}
+				val, err := caddy.ParseDuration(d.Val())
+				if err != nil {
+					return err
+				}
+				m.Interval = caddy.Duration(val)
+			case "timeout":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				val, err := caddy.ParseDuration(d.Val())
+				if err != nil {
+					return err
+				}
+				m.Timeout = caddy.Duration(val)
+			case "geolocal":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				m.GeoFile = d.Val()
+			case "georemote":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				m.RemoteFile = d.Val()
+			default:
+				return d.ArgErr()
 			}
 		}
 	}
-	if len(m.DBFile) == 0 {
-		m.DBFile = "/etc/caddy/Country.mmdb"
+	if len(m.GeoFile) == 0 {
+		m.GeoFile = "/etc/caddy/Country.mmdb"
+	}
+	if len(m.RemoteFile) == 0 {
+		m.RemoteFile = remotefile
 	}
 	return nil
 }

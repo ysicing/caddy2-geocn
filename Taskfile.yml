@@ -25,7 +25,6 @@ tasks:
           --with github.com/caddy-dns/tencentcloud
           --with github.com/caddy-dns/alidns
           --with github.com/caddy-dns/dnspod
-          --with github.com/WeidiDeng/caddy-cloudflare-ip
       - ./caddy list-modules
 
   run:
