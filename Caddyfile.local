@@ -1,37 +1,37 @@
 (LOG) {
-    log {
-        output file ./caddy.log {
-            roll_size 1mb
-            roll_keep 5
-            roll_keep_for 1h
-        }
-        format console {
-            time_format "iso8601"
-        }
-    }
+	log {
+		output file ./caddy.log {
+			roll_size 1mb
+			roll_keep 5
+			roll_keep_for 1h
+		}
+		format console {
+			time_format "iso8601"
+		}
+	}
 }
 
 (COMCFG) {
-    encode zstd gzip
+	encode zstd gzip
 }
 
 {
-    debug
+	debug
 }
 
 :2024 {
-    import COMCFG
-    import LOG
-    metrics /metrics
-    @geofilter {
-        geocn {
-            geolocal "./Country.mmdb"
-        }
-    }
-    file_server @geofilter {
-        root ./docker/example/deny
-    }
-    file_server {
-        root ./docker/example/allow
-    }
+	import COMCFG
+	import LOG
+	metrics /metrics
+	@china {
+		geocn {
+			geolocal "./Country.mmdb"
+		}
+	}
+	file_server @china {
+		root ./docker/example/deny
+	}
+	file_server {
+		root ./docker/example/allow
+	}
 }

@@ -28,9 +28,6 @@ tasks:
       - ./caddy list-modules
 
   run:
-    status:
-      - test -f ./Country.mmdb
-      - test -f ./caddy
     cmds:
       - task: build
       - ./caddy run --config ./Caddyfile.local --adapter caddyfile
