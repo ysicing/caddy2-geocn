@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -43,6 +44,7 @@ type CNGeoIP struct {
 	GeoFile string `json:"geolocal,omitempty"`
 
 	ctx      caddy.Context
+	lock     *sync.RWMutex
 	dbReader *geoip2.Reader
 	logger   *zap.Logger
 }
@@ -71,6 +73,10 @@ func (m *CNGeoIP) validSource(ip net.IP) bool {
 	if !checkip(ip) {
 		return false
 	}
+
+	m.lock.RLock()         // 添加读锁
+	defer m.lock.RUnlock() // 确保锁会被释放
+
 	record, err := m.dbReader.Country(ip)
 	if err != nil || record == nil {
 		return false
@@ -80,6 +86,7 @@ func (m *CNGeoIP) validSource(ip net.IP) bool {
 
 func (m *CNGeoIP) Provision(ctx caddy.Context) error {
 	m.ctx = ctx
+	m.lock = new(sync.RWMutex)
 	m.logger = ctx.Logger(m)
 
 	// 检查 RemoteFile 是否为空
@@ -92,11 +99,7 @@ func (m *CNGeoIP) Provision(ctx caddy.Context) error {
 		return err
 	}
 
-	// 如果设置了更新间隔，启动定时更新
-	if m.Interval > 0 {
-		go m.periodicUpdate()
-	}
-
+	go m.periodicUpdate()
 	return nil
 }
 
@@ -105,6 +108,9 @@ func (m *CNGeoIP) updateGeoFile() error {
 	if err := m.downloadFile(); err != nil {
 		return fmt.Errorf("download file %v: %v", m.RemoteFile, err)
 	}
+
+	m.lock.Lock()         // 添加写锁
+	defer m.lock.Unlock() // 确保锁会被释放
 
 	// 如果已存在 Reader，先关闭
 	if m.dbReader != nil {
