@@ -13,7 +13,7 @@ xcaddy build --with github.com/ysicing/caddy2-geocn
 ```caddyfile
     @geofilter {
         geocn {
-            db_file "./Country.mmdb"
+          geolocal "./Country.mmdb"
         }
     }
     file_server @geofilter {

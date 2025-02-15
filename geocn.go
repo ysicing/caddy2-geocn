@@ -20,11 +20,11 @@ import (
 )
 
 var (
-	_ caddy.Module             = (*CNGeoIP)(nil)
-	_ caddyhttp.RequestMatcher = (*CNGeoIP)(nil)
-	_ caddy.Provisioner        = (*CNGeoIP)(nil)
-	_ caddy.CleanerUpper       = (*CNGeoIP)(nil)
-	_ caddyfile.Unmarshaler    = (*CNGeoIP)(nil)
+	_ caddy.Module             = (*GeoCN)(nil)
+	_ caddyhttp.RequestMatcher = (*GeoCN)(nil)
+	_ caddy.Provisioner        = (*GeoCN)(nil)
+	_ caddy.CleanerUpper       = (*GeoCN)(nil)
+	_ caddyfile.Unmarshaler    = (*GeoCN)(nil)
 )
 
 const (
@@ -32,10 +32,10 @@ const (
 )
 
 func init() {
-	caddy.RegisterModule(CNGeoIP{})
+	caddy.RegisterModule(GeoCN{})
 }
 
-type CNGeoIP struct {
+type GeoCN struct {
 	// refresh Interval
 	Interval caddy.Duration `json:"interval,omitempty"`
 	// request Timeout
@@ -51,84 +51,68 @@ type CNGeoIP struct {
 	logger   *zap.Logger
 }
 
-func (CNGeoIP) CaddyModule() caddy.ModuleInfo {
+func (GeoCN) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "http.matchers.geocn",
-		New: func() caddy.Module { return new(CNGeoIP) },
+		New: func() caddy.Module { return new(GeoCN) },
 	}
 }
 
 // getContext returns a cancelable context, with a timeout if configured.
-func (s *CNGeoIP) getContext() (context.Context, context.CancelFunc) {
+func (s *GeoCN) getContext() (context.Context, context.CancelFunc) {
 	if s.Timeout > 0 {
 		return context.WithTimeout(s.ctx, time.Duration(s.Timeout))
 	}
 	return context.WithCancel(s.ctx)
 }
 
-func (m *CNGeoIP) validSource(ip net.IP) bool {
-	if ip == nil {
-		m.logger.Warn("valid ip", zap.String("ip", "nil"))
-		return false
+func (m *GeoCN) getHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: time.Duration(m.Timeout),
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true,
+			},
+			DisableKeepAlives: true,
+			IdleConnTimeout:   time.Duration(m.Timeout),
+		},
 	}
-	m.logger.Debug("valid ip", zap.String("ip", ip.String()))
-	if checkPrivateIP(ip) {
+}
+
+func (m *GeoCN) validSource(ip net.IP) bool {
+	if ip == nil || checkPrivateIP(ip) {
 		return false
 	}
 
-	m.lock.RLock()         // 添加读锁
-	defer m.lock.RUnlock() // 确保锁会被释放
+	m.lock.RLock()
+	defer m.lock.RUnlock()
 
 	record, err := m.dbReader.Country(ip)
-	if err != nil {
-		m.logger.Warn("valid ip", zap.String("ip", ip.String()), zap.Error(err))
-		return false
-	}
-	if record == nil {
+	if err != nil || record == nil {
 		return false
 	}
 	return record.Country.IsoCode == "CN"
 }
 
-func (m *CNGeoIP) Provision(ctx caddy.Context) error {
+func (m *GeoCN) Provision(ctx caddy.Context) error {
 	m.ctx = ctx
 	m.lock = new(sync.RWMutex)
 	m.logger = ctx.Logger(m)
 
-	// 检查 RemoteFile 是否为空
-	if len(m.RemoteFile) == 0 {
+	// 设置默认值
+	if m.RemoteFile == "" {
 		m.RemoteFile = remotefile
 	}
-	if len(m.GeoFile) == 0 {
+	if m.GeoFile == "" {
 		m.GeoFile = "/etc/caddy/Country.mmdb"
 	}
-	fileExists := false
-	if fileInfo, err := os.Stat(m.GeoFile); err == nil {
-		// 尝试打开现有文件
-		reader, err := geoip2.Open(m.GeoFile)
-		if err == nil {
-			m.dbReader = reader
-			fileExists = true
-			m.logger.Debug("found existing database",
-				zap.String("file", m.GeoFile),
-				zap.Time("modified", fileInfo.ModTime()))
-		}
-	}
-	if fileExists {
-		// 文件存在，检查是否需要更新
-		needUpdate, err := m.checkNeedUpdate()
-		if err != nil {
-			m.logger.Warn("failed to check updates", zap.Error(err))
-			// 检查更新失败时继续使用现有文件
-		} else if needUpdate {
-			// 需要更新时尝试更新
-			if err := m.updateGeoFile(); err != nil {
-				m.logger.Warn("failed to update database", zap.Error(err))
-				// 更新失败时继续使用现有文件
-			}
-		}
+
+	// 尝试加载现有文件
+	if reader, err := geoip2.Open(m.GeoFile); err == nil {
+		m.dbReader = reader
+		m.logger.Debug("using existing database", zap.String("file", m.GeoFile))
 	} else {
-		// 文件不存在，必须下载
+		// 文件不存在或无效，下载新文件
 		if err := m.updateGeoFile(); err != nil {
 			return fmt.Errorf("initial database download failed: %v", err)
 		}
@@ -139,16 +123,13 @@ func (m *CNGeoIP) Provision(ctx caddy.Context) error {
 }
 
 // 检查是否需要更新
-func (m *CNGeoIP) checkNeedUpdate() (bool, error) {
-	// 检查本地文件
-	fileInfo, err := os.Stat(m.GeoFile)
-	if os.IsNotExist(err) {
-		return true, nil // 本地文件不存在，需要更新
-	}
-	if fileInfo.ModTime().Before(time.Now().Add(-time.Hour * 12)) {
-		return true, nil // 本地文件修改时间超过12小时，需要更新
+func (m *GeoCN) checkNeedUpdate() (bool, error) {
+	// 如果文件不存在，需要更新
+	if _, err := os.Stat(m.GeoFile); err != nil {
+		return true, nil
 	}
 
+	// 简单检查远程文件是否可访问
 	ctx, cancel := m.getContext()
 	defer cancel()
 
@@ -157,33 +138,23 @@ func (m *CNGeoIP) checkNeedUpdate() (bool, error) {
 		return false, err
 	}
 
-	client := &http.Client{
-		Timeout: time.Second * 10,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
-			},
-			DisableKeepAlives: true,
-		},
-	}
-
-	resp, err := client.Do(req)
+	resp, err := m.getHTTPClient().Do(req)
 	if err != nil {
 		return false, err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("remote file check failed: %d", resp.StatusCode)
-	}
-
-	return true, nil
+	return resp.StatusCode == http.StatusOK, nil
 }
 
 // 更新文件
-func (m *CNGeoIP) updateGeoFile() error {
+func (m *GeoCN) updateGeoFile() error {
 	tempFile := m.GeoFile + ".temp"
-
+	out, err := os.OpenFile(tempFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return fmt.Errorf("create temporary file failed: %v", err)
+	}
+	defer out.Close()
 	// 下载到临时文件
 	if err := m.downloadFile(tempFile); err != nil {
 		os.Remove(tempFile)
@@ -220,24 +191,14 @@ func (m *CNGeoIP) updateGeoFile() error {
 	return nil
 }
 
-func (m *CNGeoIP) downloadFile(file string) error {
+func (m *GeoCN) downloadFile(file string) error {
 	ctx, cancel := m.getContext()
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.RemoteFile, nil)
 	if err != nil {
 		return err
 	}
-	var client = &http.Client{
-		Timeout: time.Second * 30,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
-			},
-			DisableKeepAlives: true,
-			IdleConnTimeout:   time.Second * 30,
-		},
-	}
-	resp, err := client.Do(req)
+	resp, err := m.getHTTPClient().Do(req)
 	if err != nil {
 		return err
 	}
@@ -257,23 +218,20 @@ func (m *CNGeoIP) downloadFile(file string) error {
 	return err
 }
 
-func (m *CNGeoIP) periodicUpdate() {
+func (m *GeoCN) periodicUpdate() {
 	if m.Interval == 0 {
 		m.Interval = caddy.Duration(time.Hour * 12)
 	}
+
 	ticker := time.NewTicker(time.Duration(m.Interval))
 	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ticker.C:
-			needUpdate, err := m.checkNeedUpdate()
-			if err != nil {
-				m.logger.Error("check update failed", zap.Error(err))
-				continue
-			}
-			if needUpdate {
+			if ok, _ := m.checkNeedUpdate(); ok {
 				if err := m.updateGeoFile(); err != nil {
-					m.logger.Error("update geofile failed", zap.Error(err))
+					m.logger.Error("update failed", zap.Error(err))
 				}
 			}
 		case <-m.ctx.Done():
@@ -282,7 +240,7 @@ func (m *CNGeoIP) periodicUpdate() {
 	}
 }
 
-func (m *CNGeoIP) Cleanup() error {
+func (m *GeoCN) Cleanup() error {
 	if m.dbReader != nil {
 		return m.dbReader.Close()
 	}
@@ -290,7 +248,7 @@ func (m *CNGeoIP) Cleanup() error {
 }
 
 // UnmarshalCaddyfile implements caddyfile.Unmarshaler.
-func (m *CNGeoIP) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+func (m *GeoCN) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	for d.Next() {
 		for n := d.Nesting(); d.NextBlock(n); {
 			switch d.Val() {
@@ -343,24 +301,27 @@ func checkPrivateIP(ip net.IP) bool {
 	return false
 }
 
-func (m *CNGeoIP) Match(r *http.Request) bool {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		m.logger.Warn("cannot split IP address", zap.String("address", r.RemoteAddr), zap.Error(err))
-		return false
-	}
-	addr := net.ParseIP(host)
-	if m.validSource(addr) {
+func (m *GeoCN) Match(r *http.Request) bool {
+	// 获取直接连接的 IP
+	remoteIP := getIP(r.RemoteAddr)
+	if remoteIP != nil && m.validSource(remoteIP) {
 		return true
 	}
-	if hVal := r.Header.Get("X-Forwarded-For"); hVal != "" {
-		ips := strings.Split(hVal, ",")
-		if len(ips) > 0 {
-			xhost := net.ParseIP(strings.TrimSpace(ips[0]))
-			if m.validSource(xhost) {
-				return true
-			}
+
+	// 检查 X-Forwarded-For
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if clientIP := getIP(strings.Split(xff, ",")[0]); clientIP != nil {
+			return m.validSource(clientIP)
 		}
 	}
 	return false
+}
+
+// 辅助函数：从字符串解析 IP
+func getIP(s string) net.IP {
+	host, _, err := net.SplitHostPort(s)
+	if err != nil {
+		host = s // 可能没有端口
+	}
+	return net.ParseIP(strings.TrimSpace(host))
 }
