@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -20,11 +21,11 @@ import (
 )
 
 var (
-	_ caddy.Module             = (*GeoCN)(nil)
-	_ caddyhttp.RequestMatcher = (*GeoCN)(nil)
-	_ caddy.Provisioner        = (*GeoCN)(nil)
-	_ caddy.CleanerUpper       = (*GeoCN)(nil)
-	_ caddyfile.Unmarshaler    = (*GeoCN)(nil)
+	_ caddy.Module                      = (*GeoCN)(nil)
+	_ caddyhttp.RequestMatcherWithError = (*GeoCN)(nil)
+	_ caddy.Provisioner                 = (*GeoCN)(nil)
+	_ caddy.CleanerUpper                = (*GeoCN)(nil)
+	_ caddyfile.Unmarshaler             = (*GeoCN)(nil)
 )
 
 const (
@@ -104,7 +105,14 @@ func (m *GeoCN) Provision(ctx caddy.Context) error {
 		m.RemoteFile = remotefile
 	}
 	if m.GeoFile == "" {
-		m.GeoFile = "/etc/caddy/Country.mmdb"
+		// 使用 Caddy 的存储目录
+		caddyDir := caddy.AppDataDir()
+		m.GeoFile = filepath.Join(caddyDir, "geocn", "Country.mmdb")
+
+		// 确保目录存在
+		if err := os.MkdirAll(filepath.Dir(m.GeoFile), 0755); err != nil {
+			return fmt.Errorf("failed to create directory: %v", err)
+		}
 	}
 
 	// 尝试加载现有文件
@@ -150,7 +158,7 @@ func (m *GeoCN) checkNeedUpdate() (bool, error) {
 // 更新文件
 func (m *GeoCN) updateGeoFile() error {
 	tempFile := m.GeoFile + ".temp"
-	out, err := os.OpenFile(tempFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	out, err := os.OpenFile(tempFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0777)
 	if err != nil {
 		return fmt.Errorf("create temporary file failed: %v", err)
 	}
@@ -299,6 +307,11 @@ func checkPrivateIP(ip net.IP) bool {
 		return true
 	}
 	return false
+}
+
+// MatchWithError implements caddyhttp.RequestMatcherWithError
+func (m *GeoCN) MatchWithError(r *http.Request) (bool, error) {
+	return m.Match(r), nil
 }
 
 func (m *GeoCN) Match(r *http.Request) bool {

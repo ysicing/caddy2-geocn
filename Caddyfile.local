@@ -24,14 +24,15 @@
 	import LOG
 	metrics /metrics
 	@china {
-		geocn {
-			geolocal "./Country.mmdb"
-		}
+		geocn
+	}
+	@notchina {
+		not geocn
 	}
 	file_server @china {
 		root ./docker/example/deny
 	}
-	file_server {
+	file_server @notchina {
 		root ./docker/example/allow
 	}
 }
