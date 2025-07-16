@@ -230,7 +230,7 @@ example.com {
     @geo {
         geocity {
             mode allow
-            allowed_cities "北京"
+            cities "北京"
         }
     }
     

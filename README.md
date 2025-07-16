@@ -54,7 +54,7 @@ city.example.com {
     @allowed_cities {
         geocity {
             mode allow
-            allowed_cities "北京" "上海"
+            cities "北京" "上海"
         }
     }
     
@@ -72,7 +72,7 @@ province.example.com {
     @blocked_provinces {
         geocity {
             mode deny
-            denied_provinces "河北" "山东"
+            provinces "河北" "山东"
         }
     }
     
