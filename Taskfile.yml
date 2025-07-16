@@ -11,9 +11,47 @@ tasks:
     cmds:
       - wget https://github.com/Hackl0us/GeoIP2-CN/raw/release/Country.mmdb
 
+  xdb:
+    run: once
+    status:
+      - test -f ./ip2region.xdb
+    cmds:
+      - wget https://github.com/lionsoul2014/ip2region/raw/master/data/ip2region.xdb
+
+  gofmt:
+    cmds:
+      - go install golang.org/x/tools/cmd/goimports@latest
+      - gofmt -s -w .
+      - goimports -w .
+
+  govulncheck:
+    desc: vulnerability detection
+    cmds:
+      - go install golang.org/x/vuln/cmd/govulncheck@v1.1.1
+      - govulncheck ./...
+
+  golint:
+    cmds:
+      - go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.57.2
+      - golangci-lint run -v ./...
+
+  gci:
+    cmds:
+      - go install github.com/daixiang0/gci@v0.13.1
+      - gci write --skip-generated --custom-order -s standard -s "prefix(github.com/ysicing/caddy2-geocn)" -s default -s blank -s dot .
+
+  fmt:
+    desc: format code
+    run: once
+    cmds:
+      - task: gofmt
+      - task: gci
+      - task: govulncheck
+
   build:
     deps:
       - mmdb
+      - xdb
     cmds:
       - go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
       - xcaddy build
@@ -31,5 +69,5 @@ tasks:
 
   default:
     cmds:
-      - rm -rf ./Country.mmdb ./caddy
+      - rm -rf ./Country.mmdb ./ip2region.xdb ./caddy
       - task: build

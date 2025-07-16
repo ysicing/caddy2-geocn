@@ -18,6 +18,8 @@ COPY --from=builder /go/src/github.com/ysicing/caddy2-geocn/caddy /usr/local/bin
 
 COPY --from=builder /go/src/github.com/ysicing/caddy2-geocn/Country.mmdb /etc/caddy/Country.mmdb
 
+COPY --from=builder /go/src/github.com/ysicing/caddy2-geocn/ip2region.xdb /etc/caddy/ip2region.xdb
+
 RUN chmod +x /usr/local/bin/caddy && \
   mkdir -p \
   /config/caddy \

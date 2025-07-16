@@ -6,6 +6,7 @@ toolchain go1.24.1
 
 require (
 	github.com/caddyserver/caddy/v2 v2.10.0
+	github.com/lionsoul2014/ip2region/binding/golang v0.0.0-20250630080345-f9402614f6ba
 	github.com/oschwald/geoip2-golang v1.13.0
 	go.uber.org/zap v1.27.0
 )

@@ -1,0 +1,130 @@
+# 示例1: 只允许北京和上海的访问（白名单模式）
+example1.com {
+    @allowed_cities {
+        geocity {
+            mode allow
+            cities "北京" "上海"
+            interval 24h
+            timeout 30s
+        }
+    }
+    
+    handle @allowed_cities {
+        respond "欢迎来自北京或上海的访问者！"
+    }
+    
+    handle {
+        respond "抱歉，只允许北京和上海地区访问" 403
+    }
+}
+
+# 示例2: 拒绝特定省份的访问（黑名单模式）
+example2.com {
+    @blocked_provinces {
+        geocity {
+            mode deny
+            provinces "河北" "山东"
+            interval 12h
+        }
+    }
+    
+    handle @blocked_provinces {
+        respond "该地区暂不提供服务" 403
+    }
+    
+    handle {
+        file_server
+    }
+}
+
+# 示例3: 复杂的地理位置控制
+example3.com {
+    @geo_control {
+        geocity {
+            mode allow
+            provinces "广东" "浙江" "江苏"
+            cities "北京" "上海" "深圳" "杭州" "南京"
+            local_file "/path/to/custom/ip2region.xdb"
+            remote_file "https://custom.domain.com/ip2region.xdb"
+            interval 6h
+            timeout 60s
+        }
+    }
+    
+    handle @geo_control {
+        reverse_proxy backend:8080
+    }
+    
+    handle {
+        respond "地理位置限制：仅限指定省市访问" 403
+    }
+}
+
+# 示例4: 与其他匹配器组合使用
+example4.com {
+    @api_access {
+        path /api/*
+        geocity {
+            mode allow
+            provinces "北京" "上海" "广东"
+        }
+    }
+    
+    @static_files {
+        path /static/*
+        file
+    }
+    
+    handle @api_access {
+        reverse_proxy api-server:3000
+    }
+    
+    handle @static_files {
+        file_server
+    }
+    
+    handle {
+        respond "API仅限指定地区访问" 403
+    }
+}
+
+# 示例5: 结合原有的 geocn 功能
+example5.com {
+    # 首先检查是否为中国IP
+    @china_ip {
+        geocn
+    }
+    
+    # 然后在中国IP中进一步限制特定城市
+    @beijing_shanghai {
+        geocity {
+            mode allow
+            cities "北京" "上海"
+        }
+    }
+    
+    # 中国IP但不是北京上海的访问
+    @china_other {
+        geocn
+        not geocity {
+            mode allow
+            cities "北京" "上海"
+        }
+    }
+    
+    handle @beijing_shanghai {
+        respond "欢迎来自北京、上海的用户！"
+    }
+    
+    handle @china_other {
+        respond "中国其他地区用户，功能受限" 200
+    }
+    
+    handle @china_ip {
+        respond "中国用户"
+    }
+    
+    handle {
+        respond "仅限中国用户访问" 403
+    }
+}
