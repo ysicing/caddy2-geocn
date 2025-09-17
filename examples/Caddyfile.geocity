@@ -1,130 +1,282 @@
-# 示例1: 只允许北京和上海的访问（白名单模式）
+# GeoCity 模块配置示例 - 城市级地理位置控制
+
+# ========================================
+# 示例1: 最简配置 - 使用默认数据源
+# ========================================
 example1.com {
     @allowed_cities {
         geocity {
             mode allow
             cities "北京" "上海"
-            interval 24h
-            timeout 30s
         }
     }
-    
+
     handle @allowed_cities {
         respond "欢迎来自北京或上海的访问者！"
     }
-    
+
     handle {
         respond "抱歉，只允许北京和上海地区访问" 403
     }
 }
 
-# 示例2: 拒绝特定省份的访问（黑名单模式）
+# ========================================
+# 示例2: 使用本地数据库文件
+# ========================================
 example2.com {
-    @blocked_provinces {
+    @local_db {
         geocity {
-            mode deny
-            provinces "河北" "山东"
-            interval 12h
+            # 使用本地文件作为数据源
+            ipv4_source /data/ip2region_v4.xdb
+            ipv6_source /data/ip2region_v6.xdb
+            mode allow
+            provinces "广东" "浙江"
+            cities "北京" "上海"
         }
     }
-    
-    handle @blocked_provinces {
+
+    handle @local_db {
+        file_server
+    }
+
+    handle {
+        respond "地理位置限制" 403
+    }
+}
+
+# ========================================
+# 示例3: 使用自定义 HTTP 数据源
+# ========================================
+example3.com {
+    @custom_source {
+        geocity {
+            # 使用自定义 CDN 源
+            ipv4_source https://cdn.example.com/ip2region_v4.xdb
+            ipv6_source https://cdn.example.com/ip2region_v6.xdb
+            mode deny  # 黑名单模式
+            provinces "河北" "山东"
+            interval 24h  # 每24小时更新一次
+            timeout 30s
+        }
+    }
+
+    handle @custom_source {
         respond "该地区暂不提供服务" 403
     }
-    
+
     handle {
         file_server
     }
 }
 
-# 示例3: 复杂的地理位置控制
-example3.com {
-    @geo_control {
+# ========================================
+# 示例4: 混合数据源（本地+远程）
+# ========================================
+example4.com {
+    @mixed_source {
         geocity {
+            # IPv4 使用本地文件（不会自动更新）
+            ipv4_source /opt/geodata/ip2region_v4.xdb
+            # IPv6 使用远程源（会定期更新）
+            ipv6_source https://github.com/lionsoul2014/ip2region/raw/master/data/ip2region_v6.xdb
             mode allow
-            provinces "广东" "浙江" "江苏"
-            cities "北京" "上海" "深圳" "杭州" "南京"
-            local_file "/path/to/custom/ip2region.xdb"
-            remote_file "https://custom.domain.com/ip2region.xdb"
-            interval 6h
-            timeout 60s
+            provinces "北京" "上海" "广东"
+            interval 24h  # IPv6 数据库每24小时检查更新
         }
     }
-    
-    handle @geo_control {
+
+    handle @mixed_source {
         reverse_proxy backend:8080
     }
-    
+
     handle {
-        respond "地理位置限制：仅限指定省市访问" 403
+        respond "访问受限" 403
     }
 }
 
-# 示例4: 与其他匹配器组合使用
-example4.com {
-    @api_access {
+# ========================================
+# 示例5: 启用缓存优化
+# ========================================
+example5.com {
+    @cached {
+        geocity {
+            mode allow
+            provinces "江苏" "浙江" "上海"
+            # 缓存配置（默认已启用）
+            cache ttl 10m size 20000  # TTL 10分钟，最大20000条
+        }
+    }
+
+    handle @cached {
+        file_server
+    }
+
+    handle {
+        respond "地区限制" 403
+    }
+}
+
+# ========================================
+# 示例6: 禁用缓存
+# ========================================
+example6.com {
+    @no_cache {
+        geocity {
+            mode allow
+            cities "深圳" "杭州"
+            cache off  # 显式禁用缓存
+        }
+    }
+
+    handle @no_cache {
+        respond "Welcome!"
+    }
+}
+
+# ========================================
+# 示例7: 与其他匹配器组合使用
+# ========================================
+example7.com {
+    # API 路径 + 地理位置限制
+    @api_geo {
         path /api/*
         geocity {
             mode allow
             provinces "北京" "上海" "广东"
         }
     }
-    
-    @static_files {
+
+    # 静态文件（不限制地理位置）
+    @static {
         path /static/*
         file
     }
-    
-    handle @api_access {
+
+    handle @api_geo {
         reverse_proxy api-server:3000
     }
-    
-    handle @static_files {
+
+    handle @static {
         file_server
     }
-    
+
     handle {
-        respond "API仅限指定地区访问" 403
+        respond "API 仅限指定地区访问" 403
     }
 }
 
-# 示例5: 结合原有的 geocn 功能
-example5.com {
-    # 首先检查是否为中国IP
-    @china_ip {
+# ========================================
+# 示例8: 多层地理位置控制
+# ========================================
+example8.com {
+    # 第一层：检查是否为中国IP
+    @china {
         geocn
     }
-    
-    # 然后在中国IP中进一步限制特定城市
-    @beijing_shanghai {
+
+    # 第二层：在中国IP中限制特定城市
+    @tier1_cities {
         geocity {
             mode allow
-            cities "北京" "上海"
+            cities "北京" "上海" "深圳" "广州"
         }
     }
-    
-    # 中国IP但不是北京上海的访问
-    @china_other {
+
+    # 第三层：其他中国城市
+    @other_china {
         geocn
         not geocity {
             mode allow
-            cities "北京" "上海"
+            cities "北京" "上海" "深圳" "广州"
         }
     }
-    
-    handle @beijing_shanghai {
-        respond "欢迎来自北京、上海的用户！"
+
+    handle @tier1_cities {
+        # 一线城市用户：完全访问
+        reverse_proxy premium-backend:8080
     }
-    
-    handle @china_other {
-        respond "中国其他地区用户，功能受限" 200
+
+    handle @other_china {
+        # 其他中国用户：基础访问
+        reverse_proxy basic-backend:8080
     }
-    
-    handle @china_ip {
-        respond "中国用户"
+
+    handle @china {
+        # 中国用户但未匹配城市
+        respond "请联系管理员" 200
     }
-    
+
     handle {
-        respond "仅限中国用户访问" 403
+        # 非中国IP
+        respond "Service not available in your region" 403
     }
 }
+
+# ========================================
+# 示例9: 完整配置示例
+# ========================================
+production.example.com {
+    @allowed {
+        geocity {
+            # 数据源配置（可选，默认使用官方源）
+            # ipv4_source 和 ipv6_source 都是可选的
+            # 不配置则使用默认源
+
+            # 匹配模式
+            mode allow  # allow (白名单) 或 deny (黑名单)
+
+            # 地理位置过滤
+            provinces "北京" "上海" "广东" "江苏" "浙江"
+            cities "深圳" "杭州" "南京" "苏州" "宁波"
+
+            # 更新策略（仅对 HTTP 源有效）
+            interval 24h  # 更新间隔
+            timeout 30s   # 请求超时
+
+            # 缓存配置
+            cache ttl 5m size 10000  # 或使用 cache off 禁用
+        }
+    }
+
+    handle @allowed {
+        reverse_proxy {
+            to backend1:8080 backend2:8080
+            lb_policy round_robin
+            health_uri /health
+            health_interval 10s
+        }
+    }
+
+    handle {
+        respond "您所在的地区暂不提供服务" 403
+    }
+}
+
+# ========================================
+# 配置说明
+# ========================================
+# 1. 数据源配置（都是可选的）：
+#    - ipv4_source: IPv4 数据库源（HTTP URL 或本地路径）
+#    - ipv6_source: IPv6 数据库源（HTTP URL 或本地路径）
+#    - 不配置则使用默认官方源
+#
+# 2. 缓存文件自动管理：
+#    - 所有缓存文件自动存储在 Caddy 数据目录
+#    - 用户无需指定本地缓存路径
+#    - 路径示例: <caddy_data>/geocity/ipv4.xdb
+#
+# 3. 数据源类型：
+#    - HTTP/HTTPS URL: 自动下载并定期更新
+#    - 本地文件路径: 直接使用，不会更新
+#    - 可以混合使用（如 IPv4 用本地，IPv6 用远程）
+#
+# 4. 更新策略：
+#    - 仅 HTTP 源会定期检查更新
+#    - 本地文件源不会自动更新
+#    - interval 设置更新检查间隔
+#
+# 5. 缓存策略：
+#    - 默认启用缓存以提升性能
+#    - cache ttl: 缓存有效期
+#    - cache size: 最大缓存条目数
+#    - cache off: 禁用缓存

@@ -1,0 +1,229 @@
+# Caddy 配置示例 - GeoCN 和 GeoCity 缓存功能配置
+
+# ========================================
+# GeoCN 模块配置示例（国家级地理位置匹配）
+# ========================================
+
+# 示例1: 最简配置（默认启用缓存）
+:8080 {
+    @china {
+        geocn {
+            # 默认使用官方数据源，默认启用缓存
+            # 无需任何额外配置
+        }
+    }
+
+    handle @china {
+        respond "欢迎来自中国的访问！" 200
+    }
+
+    handle {
+        respond "仅限中国访问" 403
+    }
+}
+
+# 示例2: 自定义数据源和缓存配置
+:8081 {
+    @china_custom {
+        geocn {
+            # 使用自定义数据源（可以是 HTTP URL 或本地文件）
+            source https://cdn.example.com/Country.mmdb
+
+            # 更新策略（仅对 HTTP 源有效）
+            interval 24h  # 每24小时检查更新
+            timeout 30s   # 请求超时30秒
+
+            # 缓存配置（可选，默认已启用）
+            cache ttl 5m size 10000  # TTL 5分钟，最大10000条
+        }
+    }
+
+    handle @china_custom {
+        file_server
+    }
+
+    handle {
+        respond "Access denied" 403
+    }
+}
+
+# 示例3: 使用本地数据库文件（无自动更新）
+:8082 {
+    @china_local {
+        geocn {
+            # 使用本地文件作为数据源
+            source /opt/geodata/Country.mmdb
+
+            # 本地文件不会自动更新，interval 设置无效
+            # 缓存仍然有效，提升查询性能
+            cache ttl 10m size 20000
+        }
+    }
+
+    handle @china_local {
+        respond "中国用户专属内容" 200
+    }
+}
+
+# 示例4: 禁用缓存（不推荐，影响性能）
+:8083 {
+    @china_nocache {
+        geocn {
+            cache off  # 显式禁用缓存
+        }
+    }
+
+    handle @china_nocache {
+        respond "Welcome!" 200
+    }
+}
+
+# ========================================
+# GeoCity 模块配置示例（城市级地理位置匹配）
+# ========================================
+
+# 示例5: 双栈支持（IPv4 + IPv6）
+:8084 {
+    @city_dual {
+        geocity {
+            # 分别配置 IPv4 和 IPv6 数据源
+            # 不配置则使用默认官方源
+            # ipv4_source https://github.com/lionsoul2014/ip2region/raw/master/data/ip2region_v4.xdb
+            # ipv6_source https://github.com/lionsoul2014/ip2region/raw/master/data/ip2region_v6.xdb
+
+            mode allow
+            provinces "北京" "上海" "广东"
+
+            # 缓存对两个版本都有效
+            cache ttl 10m size 20000
+        }
+    }
+
+    handle @city_dual {
+        respond "欢迎访问！" 200
+    }
+}
+
+# 示例6: 混合数据源 + 缓存优化
+:8085 {
+    @city_mixed {
+        geocity {
+            # IPv4 使用本地文件（不更新）
+            ipv4_source /data/ip2region_v4.xdb
+            # IPv6 使用远程源（自动更新）
+            ipv6_source https://cdn.example.com/ip2region_v6.xdb
+
+            mode allow
+            cities "北京" "上海" "深圳" "杭州"
+
+            # 更新配置（仅影响 IPv6）
+            interval 24h
+            timeout 60s
+
+            # 缓存配置（两个版本共享）
+            cache ttl 15m size 30000
+        }
+    }
+
+    handle @city_mixed {
+        reverse_proxy backend:8080
+    }
+}
+
+# ========================================
+# 高级配置示例
+# ========================================
+
+# 示例7: 多层缓存策略
+example.com {
+    # 第一层：国家级缓存（TTL 较长）
+    @china_cache {
+        geocn {
+            cache ttl 30m size 50000  # 30分钟 TTL
+        }
+    }
+
+    # 第二层：城市级缓存（TTL 较短）
+    @city_cache {
+        geocity {
+            mode allow
+            provinces "北京" "上海"
+            cache ttl 5m size 10000   # 5分钟 TTL
+        }
+    }
+
+    # 处理逻辑
+    handle @city_cache {
+        # 城市匹配：使用高级服务
+        reverse_proxy premium:8080
+    }
+
+    handle @china_cache {
+        # 中国其他地区：基础服务
+        reverse_proxy basic:8080
+    }
+
+    handle {
+        # 非中国地区
+        respond "Service not available" 403
+    }
+}
+
+# ========================================
+# JSON 配置格式示例
+# ========================================
+# {
+#   "apps": {
+#     "http": {
+#       "servers": {
+#         "srv0": {
+#           "listen": [":80"],
+#           "routes": [{
+#             "match": [{
+#               "geocn": {
+#                 "source": "https://github.com/Hackl0us/GeoIP2-CN/raw/release/Country.mmdb",
+#                 "interval": 86400000000000,    // 24小时（纳秒）
+#                 "timeout": 30000000000,         // 30秒（纳秒）
+#                 "enable_cache": true,           // 启用缓存
+#                 "cache_ttl": 300000000000,      // 5分钟（纳秒）
+#                 "cache_max_size": 10000         // 最大缓存条目
+#               }
+#             }],
+#             "handle": [{
+#               "handler": "static_response",
+#               "body": "Welcome from China!"
+#             }]
+#           }]
+#         }
+#       }
+#     }
+#   }
+# }
+
+# ========================================
+# 缓存配置最佳实践
+# ========================================
+# 1. TTL（Time To Live）设置建议：
+#    - 高流量站点：1-5 分钟
+#    - 中等流量：5-15 分钟
+#    - 低流量站点：15-30 分钟
+#
+# 2. 缓存大小设置建议：
+#    - 小型站点：1000-5000 条
+#    - 中型站点：5000-20000 条
+#    - 大型站点：20000-100000 条
+#
+# 3. 性能优化：
+#    - 默认启用缓存，无需额外配置
+#    - 根据访问模式调整 TTL
+#    - 监控缓存命中率，调整大小
+#
+# 4. 内存使用估算：
+#    - GeoCN: 每条缓存约 100 字节
+#    - GeoCity: 每条缓存约 50 字节
+#    - 10000 条缓存约占用 1MB 内存
+#
+# 5. 数据源管理：
+#    - HTTP 源：自动下载到 Caddy 数据目录
+#    - 本地文件：直接使用或复制到缓存目录
+#    - 缓存路径：<caddy_data>/geocn/ 或 <caddy_data>/geocity/

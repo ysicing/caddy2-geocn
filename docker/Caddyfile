@@ -25,7 +25,7 @@
     metrics /metrics
     @geofilter {
         geocn {
-            geolocal "/etc/caddy/Country.mmdb"
+            source "/etc/caddy/Country.mmdb"
         }
     }
     file_server @geofilter {
