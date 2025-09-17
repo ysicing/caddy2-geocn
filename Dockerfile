@@ -18,7 +18,10 @@ COPY --from=builder /go/src/github.com/ysicing/caddy2-geocn/caddy /usr/local/bin
 
 COPY --from=builder /go/src/github.com/ysicing/caddy2-geocn/Country.mmdb /etc/caddy/Country.mmdb
 
-COPY --from=builder /go/src/github.com/ysicing/caddy2-geocn/ip2region.xdb /etc/caddy/ip2region.xdb
+COPY --from=builder /go/src/github.com/ysicing/caddy2-geocn/ip2region_v4.xdb /etc/caddy/ip2region_v4.xdb
+
+COPY --from=builder /go/src/github.com/ysicing/caddy2-geocn/ip2region_v6.xdb /etc/caddy/ip2region_v6.xdb
+
 
 RUN chmod +x /usr/local/bin/caddy && \
   mkdir -p \
@@ -27,9 +30,9 @@ RUN chmod +x /usr/local/bin/caddy && \
   /etc/caddy \
   /usr/share/caddy
 
-ENV XDG_CONFIG_HOME /config
+ENV XDG_CONFIG_HOME=/config
 
-ENV XDG_DATA_HOME /data
+ENV XDG_DATA_HOME=/data
 
 EXPOSE 80
 EXPOSE 443

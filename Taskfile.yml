@@ -2,6 +2,23 @@ version: '3'
 
 tasks:
 
+  mmdb:
+    run: once
+    status:
+      - test -f ./Country.mmdb
+    cmds:
+      - wget https://github.com/Hackl0us/GeoIP2-CN/raw/release/Country.mmdb
+
+  xdb:
+    run: once
+    status:
+      - test -f ./ip2region_v4.xdb
+      - test -f ./ip2region_v6.xdb
+    cmds:
+      - wget https://github.com/lionsoul2014/ip2region/raw/master/data/ip2region_v4.xdb
+      - wget https://github.com/lionsoul2014/ip2region/raw/master/data/ip2region_v6.xdb
+
+
   gofmt:
     cmds:
       - command -v goimports || go install golang.org/x/tools/cmd/goimports@latest
@@ -33,6 +50,9 @@ tasks:
       - task: govulncheck
 
   build:
+    deps:
+      - mmdb
+      - xdb
     cmds:
       - go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
       - xcaddy build
@@ -49,5 +69,5 @@ tasks:
 
   default:
     cmds:
-      - rm -rf ./caddy
+      - rm -rf ./caddy ./Country.mmdb ./ip2region_v4.xdb ./ip2region_v6.xdb
       - task: build

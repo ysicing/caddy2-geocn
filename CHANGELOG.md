@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 全面的单元测试覆盖，包括缓存、更新和并发测试
 - IP 版本检测辅助函数 (ipversion.go)
 - 配置示例文件 examples/Caddyfile.cache
+- Taskfile 任务：自动下载 mmdb 和 xdb 数据库文件
 
 ### Changed
 - 简化配置结构，移除 LocalFile、LocalDir、IPVersion 等冗余字段
@@ -27,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 更新所有配置示例以反映新的简化配置方式
 - 改进并发安全性，使用 sync.RWMutex 保护共享资源
 - 优化数据库更新流程，支持原子替换避免服务中断
+- Dockerfile：分离 IPv4 和 IPv6 数据库文件复制
+- Taskfile：添加数据库文件清理到 default 任务
 
 ### Fixed
 - 修复并发访问缓存时的竞态条件
