@@ -6,7 +6,7 @@ require (
 	github.com/caddyserver/caddy/v2 v2.10.2
 	github.com/lionsoul2014/ip2region/binding/golang v0.0.0-20250916043522-9a14e3273609
 	github.com/oschwald/geoip2-golang/v2 v2.0.0
-	go.uber.org/zap v1.27.0
+	go.uber.org/zap v1.27.1
 )
 
 require (
