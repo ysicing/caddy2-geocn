@@ -1,4 +1,4 @@
 caddy
 caddy.log
 Country.mmdb
-ip2region.xdb
+*.xdb

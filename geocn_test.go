@@ -2,7 +2,6 @@ package geocn
 
 import (
 	"context"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -28,22 +27,9 @@ func fixturePath(t *testing.T, name string) string {
 	return filepath.Join(filepath.Dir(filename), name)
 }
 
-func copyFile(t *testing.T, src, dst string) {
+func copyTestFile(t *testing.T, src, dst string) {
 	t.Helper()
-
-	in, err := os.Open(src)
-	if err != nil {
-		t.Fatalf("open source: %v", err)
-	}
-	defer in.Close()
-
-	out, err := os.Create(dst)
-	if err != nil {
-		t.Fatalf("create destination: %v", err)
-	}
-	defer out.Close()
-
-	if _, err := io.Copy(out, in); err != nil {
+	if err := copyFile(src, dst); err != nil {
 		t.Fatalf("copy file: %v", err)
 	}
 }
@@ -60,7 +46,7 @@ func TestGeoCNUpdateGeoFileReplacesReader(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	localFile := filepath.Join(tmpDir, "Country.mmdb")
-	copyFile(t, fixture, localFile)
+	copyTestFile(t, fixture, localFile)
 
 	initialReader, err := geoip2.Open(localFile)
 	if err != nil {
@@ -84,6 +70,13 @@ func TestGeoCNUpdateGeoFileReplacesReader(t *testing.T) {
 		lock:      &sync.RWMutex{},
 		dbReader:  initialReader,
 		logger:    zap.NewNop(),
+		httpClient: &http.Client{
+			Timeout: time.Second,
+			Transport: &http.Transport{
+				DisableKeepAlives: true,
+				IdleConnTimeout:   time.Second,
+			},
+		},
 	}
 
 	if err := module.updateGeoFile(); err != nil {
@@ -133,7 +126,7 @@ func TestGeoCityUpdateDatabaseReplacesSearcher(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	localFile := filepath.Join(tmpDir, "ip2region.xdb")
-	copyFile(t, fixture, localFile)
+	copyTestFile(t, fixture, localFile)
 
 	initialSearcher, err := xdb.NewWithFileOnly(xdb.IPv4, localFile)
 	if err != nil {
@@ -157,6 +150,13 @@ func TestGeoCityUpdateDatabaseReplacesSearcher(t *testing.T) {
 		lock:          &sync.RWMutex{},
 		searcherIPv4:  initialSearcher,
 		logger:        zap.NewNop(),
+		httpClient: &http.Client{
+			Timeout: time.Second,
+			Transport: &http.Transport{
+				DisableKeepAlives: true,
+				IdleConnTimeout:   time.Second,
+			},
+		},
 	}
 
 	if err := module.updateDatabaseIPv4(); err != nil {
@@ -185,7 +185,7 @@ func TestGeoCityUpdateDatabaseReplacesSearcher(t *testing.T) {
 	})
 }
 
-func TestGeoCNDownloadFileRejectsInvalidTLS(t *testing.T) {
+func TestDownloadFileRejectsInvalidTLS(t *testing.T) {
 	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -194,16 +194,18 @@ func TestGeoCNDownloadFileRejectsInvalidTLS(t *testing.T) {
 	tmpDir := t.TempDir()
 	target := filepath.Join(tmpDir, "download.tmp")
 
-	module := &GeoCN{
-		Timeout:   caddy.Duration(500 * time.Millisecond),
-		Source:    tlsSrv.URL,
-		localFile: target,
-		ctx:       newTestContext(),
-		lock:      &sync.RWMutex{},
-		logger:    zap.NewNop(),
+	client := &http.Client{
+		Timeout: 500 * time.Millisecond,
+		Transport: &http.Transport{
+			DisableKeepAlives: true,
+			IdleConnTimeout:   500 * time.Millisecond,
+		},
 	}
 
-	err := module.downloadFile(target)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	err := downloadFile(ctx, client, tlsSrv.URL, target)
 	if err == nil {
 		t.Fatalf("expected TLS download to fail due to self-signed certificate")
 	}
