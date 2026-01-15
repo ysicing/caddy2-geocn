@@ -16,14 +16,15 @@ xcaddy build --with github.com/ysicing/caddy2-geocn
 
 ### GeoCN 模块
 - 🇨🇳 识别中国 IP 地址
-- 🧠 IP 获取优先级：RemoteAddr → X-Forwarded-For(首个) → X-Real-IP
+- 🧠 IP 获取：优先使用 Caddy 的 `ClientIPVarKey`（需配置 `trusted_proxies`），回退到 `RemoteAddr`
 - 🔄 自动更新 GeoIP2 数据库（默认每 24h 检查）
 - 🗄️ 查询结果缓存（默认启用：TTL 5m，容量 10000；可在 Caddyfile 用 `cache off` 关闭）
 - 🚀 高性能 IP 地理位置查询
 
-### GeoCity 模块  
+### GeoCity 模块
 - 🏙️ 支持省份和城市级别的访问控制
 - ✅ 白名单和黑名单模式
+- 🧠 IP 获取：优先使用 Caddy 的 `ClientIPVarKey`（需配置 `trusted_proxies`），回退到 `RemoteAddr`
 - 🔄 自动更新 ip2region 数据库（默认每 24h 检查）
 - 🗄️ 查询结果缓存（默认启用：TTL 5m，容量 10000；可在 Caddyfile 用 `cache off` 关闭）
 - 🎯 精确的地理位置识别
@@ -33,16 +34,23 @@ xcaddy build --with github.com/ysicing/caddy2-geocn
 ### GeoCN - 中国 IP 识别
 
 ```caddyfile
+{
+    # 如果在反向代理后面，需要配置 trusted_proxies
+    servers {
+        trusted_proxies static 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+    }
+}
+
 # 只允许中国 IP 访问
 china.example.com {
     @china_ip {
         geocn
     }
-    
+
     handle @china_ip {
         file_server
     }
-    
+
     handle {
         respond "仅限中国大陆访问" 403
     }
@@ -93,6 +101,13 @@ china.example.com {
 ### GeoCity - 省市地区控制
 
 ```caddyfile
+{
+    # 如果在反向代理后面，需要配置 trusted_proxies
+    servers {
+        trusted_proxies static 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+    }
+}
+
 # 只允许北京和上海访问
 city.example.com {
     @allowed_cities {
@@ -101,11 +116,11 @@ city.example.com {
             cities "北京" "上海"
         }
     }
-    
+
     handle @allowed_cities {
         reverse_proxy backend:8080
     }
-    
+
     handle {
         respond "仅限北京、上海地区访问" 403
     }
@@ -119,11 +134,11 @@ province.example.com {
             provinces "河北" "山东"
         }
     }
-    
+
     handle @blocked_provinces {
         respond "该地区暂不提供服务" 403
     }
-    
+
     handle {
         file_server
     }
@@ -137,7 +152,7 @@ province.example.com {
 - 数据源：支持 HTTP URL 或本地文件（分别配置 v4/v6 源）
 - 更新：默认每 24h 检查 HTTP 源是否更新，缺少 Last-Modified 时按 `interval` 回退判断
 - 缓存：默认启用（TTL 5m，容量 10000），可 `cache off` 关闭
-- IP 获取：RemoteAddr → X-Forwarded-For(首个) → X-Real-IP
+- IP 获取：优先使用 Caddy 的 `ClientIPVarKey`（需配置 `trusted_proxies`），回退到 `RemoteAddr`
 
 配置项（精简）：
 - `mode`：`allow`（默认）或 `deny`
@@ -202,3 +217,36 @@ geocity {
 - 非中国 IP：allow 模式下默认不匹配；deny 模式下默认匹配
 - 本地文件作为数据源时不参与定期更新；HTTP 源才会根据 `interval` 检查更新
 - 首次运行会自动下载数据库到 `{caddy_data_dir}/geocity/ipv4.xdb` 与 `{caddy_data_dir}/geocity/ipv6.xdb`
+
+## 反向代理配置
+
+当 Caddy 位于反向代理（如 nginx、Cloudflare）后面时，需要配置 `trusted_proxies` 以正确获取客户端真实 IP：
+
+```caddyfile
+{
+    servers {
+        trusted_proxies static 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+    }
+}
+
+example.com {
+    @cn {
+        geocn
+    }
+    handle @cn {
+        respond "Welcome from China!"
+    }
+}
+```
+
+Cloudflare 示例：
+
+```caddyfile
+{
+    servers {
+        trusted_proxies cloudflare
+    }
+}
+```
+
+> 注意：如果未配置 `trusted_proxies`，模块会回退到使用 `RemoteAddr`，这在有反向代理时可能获取到代理服务器的 IP 而非客户端真实 IP。

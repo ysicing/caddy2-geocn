@@ -6,7 +6,6 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +14,7 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/oschwald/geoip2-golang/v2"
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 )
 
 var (
@@ -25,7 +25,7 @@ var (
 	_ caddyfile.Unmarshaler             = (*GeoCN)(nil)
 )
 
-const remotefile = "https://github.com/Hackl0us/GeoIP2-CN/raw/release/Country.mmdb"
+const remotefile = "https://gh.dev.438250.xyz/https://github.com/Hackl0us/GeoIP2-CN/raw/release/Country.mmdb"
 
 func init() {
 	caddy.RegisterModule(GeoCN{})
@@ -48,6 +48,7 @@ type GeoCN struct {
 	httpClient *http.Client
 	cacheOnce  *sync.Once
 	updateOnce *sync.Once
+	sfGroup    *singleflight.Group
 }
 
 // ipCache is a TTL cache for IP country lookups.
@@ -76,29 +77,43 @@ func (m *GeoCN) validSource(host string) bool {
 		return false
 	}
 
+	// Check cache first
 	if m.cache != nil {
 		if country, found := m.cache.Get(host); found {
 			return country == "CN"
 		}
 	}
 
-	m.lock.RLock()
-	defer m.lock.RUnlock()
+	// Use singleflight to deduplicate concurrent requests for the same IP
+	result, _, _ := m.sfGroup.Do(host, func() (any, error) {
+		// Double-check cache after acquiring singleflight
+		if m.cache != nil {
+			if country, found := m.cache.Get(host); found {
+				return country, nil
+			}
+		}
 
-	if m.dbReader == nil {
-		return false
-	}
+		m.lock.RLock()
+		defer m.lock.RUnlock()
 
-	record, err := m.dbReader.Country(nip)
-	if err != nil || record == nil || !record.HasData() {
-		return false
-	}
+		if m.dbReader == nil {
+			return "", nil
+		}
 
-	country := record.Country.ISOCode
-	if m.cache != nil && country != "" {
-		m.cache.Set(host, country)
-	}
+		record, err := m.dbReader.Country(nip)
+		if err != nil || record == nil || !record.HasData() {
+			return "", nil
+		}
 
+		country := record.Country.ISOCode
+		if m.cache != nil && country != "" {
+			m.cache.Set(host, country)
+		}
+
+		return country, nil
+	})
+
+	country, _ := result.(string)
 	return country == "CN"
 }
 
@@ -108,6 +123,7 @@ func (m *GeoCN) Provision(ctx caddy.Context) error {
 	m.logger = ctx.Logger(m)
 	m.cacheOnce = new(sync.Once)
 	m.updateOnce = new(sync.Once)
+	m.sfGroup = new(singleflight.Group)
 
 	if m.Source == "" {
 		m.Source = remotefile
@@ -182,6 +198,9 @@ func (m *GeoCN) loadDatabase() error {
 			return fmt.Errorf("local file not found: %s", m.Source)
 		}
 		if err := copyFile(m.Source, m.localFile); err != nil {
+			m.logger.Debug("failed to copy database to cache, using source directly",
+				zap.String("source", m.Source),
+				zap.Error(err))
 			m.localFile = m.Source
 		}
 	}
@@ -225,19 +244,25 @@ func (m *GeoCN) updateGeoFile() error {
 	defer cancel()
 
 	if err := downloadFile(ctx, m.httpClient, m.Source, tempFile); err != nil {
-		os.Remove(tempFile)
+		if rmErr := os.Remove(tempFile); rmErr != nil {
+			m.logger.Debug("failed to remove temp file", zap.String("file", tempFile), zap.Error(rmErr))
+		}
 		return fmt.Errorf("download failed: %v", err)
 	}
 
 	tempReader, err := geoip2.Open(tempFile)
 	if err != nil {
-		os.Remove(tempFile)
+		if rmErr := os.Remove(tempFile); rmErr != nil {
+			m.logger.Debug("failed to remove temp file", zap.String("file", tempFile), zap.Error(rmErr))
+		}
 		return fmt.Errorf("invalid database file: %v", err)
 	}
 	tempReader.Close()
 
 	if err := os.Rename(tempFile, m.localFile); err != nil {
-		os.Remove(tempFile)
+		if rmErr := os.Remove(tempFile); rmErr != nil {
+			m.logger.Debug("failed to remove temp file", zap.String("file", tempFile), zap.Error(rmErr))
+		}
 		return fmt.Errorf("replace database file failed: %v", err)
 	}
 
@@ -365,20 +390,26 @@ func (m *GeoCN) MatchWithError(r *http.Request) (bool, error) {
 }
 
 func (m *GeoCN) Match(r *http.Request) bool {
-	if host := getHost(r.RemoteAddr); host != "" && m.validSource(host) {
-		return true
-	}
-
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if client := getHost(strings.Split(xff, ",")[0]); client != "" {
-			return m.validSource(client)
+	// Use Caddy's ClientIPVarKey which respects trusted_proxies configuration
+	if clientIP, ok := caddyhttp.GetVar(r.Context(), caddyhttp.ClientIPVarKey).(string); ok && clientIP != "" {
+		if host := getHost(clientIP); host != "" {
+			matched := m.validSource(host)
+			m.logger.Debug("geocn match result",
+				zap.String("client_ip", clientIP),
+				zap.Bool("is_cn", matched))
+			return matched
 		}
 	}
-
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		if client := getHost(xri); client != "" {
-			return m.validSource(client)
-		}
+	m.logger.Debug("ClientIPVarKey not set, using RemoteAddr")
+	// Fallback to RemoteAddr if ClientIPVarKey is not set
+	if host := getHost(r.RemoteAddr); host != "" {
+		matched := m.validSource(host)
+		m.logger.Debug("geocn match result (fallback)",
+			zap.String("remote_addr", r.RemoteAddr),
+			zap.String("host", host),
+			zap.Bool("is_cn", matched))
+		return matched
 	}
+
 	return false
 }

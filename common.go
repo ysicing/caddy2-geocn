@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -59,8 +60,37 @@ func copyFile(src, dst string) error {
 	return destFile.Sync()
 }
 
+// downloadLocks prevents concurrent downloads of the same file.
+var (
+	downloadLocks   = make(map[string]*sync.Mutex)
+	downloadLocksMu sync.Mutex
+)
+
+// getDownloadLock returns a mutex for the given file path.
+func getDownloadLock(path string) *sync.Mutex {
+	downloadLocksMu.Lock()
+	defer downloadLocksMu.Unlock()
+	if downloadLocks[path] == nil {
+		downloadLocks[path] = &sync.Mutex{}
+	}
+	return downloadLocks[path]
+}
+
 // downloadFile downloads a file from remoteURL to localFile using the provided HTTP client.
+// It downloads to a unique temporary file first, then atomically moves it to the target location.
+// Concurrent calls with the same localFile will be serialized, and if the file already exists
+// after acquiring the lock, the download is skipped.
 func downloadFile(ctx context.Context, client *http.Client, remoteURL, localFile string) error {
+	// Serialize downloads for the same file
+	lock := getDownloadLock(localFile)
+	lock.Lock()
+	defer lock.Unlock()
+
+	// Check if file already exists (another goroutine may have downloaded it)
+	if _, err := os.Stat(localFile); err == nil {
+		return nil
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, remoteURL, nil)
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
@@ -76,16 +106,34 @@ func downloadFile(ctx context.Context, client *http.Client, remoteURL, localFile
 		return fmt.Errorf("unexpected status code %d for %s", resp.StatusCode, remoteURL)
 	}
 
-	out, err := os.Create(localFile)
+	// Create unique temporary file in the same directory to ensure atomic rename works
+	dir := filepath.Dir(localFile)
+	out, err := os.CreateTemp(dir, filepath.Base(localFile)+".download.*")
 	if err != nil {
-		return fmt.Errorf("creating file: %w", err)
+		return fmt.Errorf("creating temp file: %w", err)
 	}
-	defer out.Close()
+	tempFile := out.Name()
 
 	if _, err = io.Copy(out, resp.Body); err != nil {
+		out.Close()
+		os.Remove(tempFile)
 		return fmt.Errorf("writing file: %w", err)
 	}
-	return out.Sync()
+
+	if err = out.Sync(); err != nil {
+		out.Close()
+		os.Remove(tempFile)
+		return fmt.Errorf("syncing file: %w", err)
+	}
+	out.Close()
+
+	// Atomically move to target location
+	if err = os.Rename(tempFile, localFile); err != nil {
+		os.Remove(tempFile)
+		return fmt.Errorf("moving file: %w", err)
+	}
+
+	return nil
 }
 
 // checkRemoteUpdate checks if a remote file needs to be updated based on Last-Modified header.
@@ -219,6 +267,7 @@ func (c *Cache[T]) evictOldest() {
 }
 
 // Cleanup removes expired entries periodically until context is done.
+// Uses two-phase cleanup to minimize lock contention.
 func (c *Cache[T]) Cleanup(ctx context.Context) {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
@@ -226,14 +275,28 @@ func (c *Cache[T]) Cleanup(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
-			c.mu.Lock()
+			// Phase 1: Collect expired keys with read lock
+			c.mu.RLock()
 			now := time.Now()
+			var keysToDelete []string
 			for key, entry := range c.entries {
 				if now.Sub(entry.timestamp) > c.ttl {
-					delete(c.entries, key)
+					keysToDelete = append(keysToDelete, key)
 				}
 			}
-			c.mu.Unlock()
+			c.mu.RUnlock()
+
+			// Phase 2: Delete expired entries with write lock
+			if len(keysToDelete) > 0 {
+				c.mu.Lock()
+				for _, key := range keysToDelete {
+					// Re-check to avoid deleting entries updated between phases
+					if entry, exists := c.entries[key]; exists && now.Sub(entry.timestamp) > c.ttl {
+						delete(c.entries, key)
+					}
+				}
+				c.mu.Unlock()
+			}
 		case <-ctx.Done():
 			return
 		}

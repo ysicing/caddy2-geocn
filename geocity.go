@@ -15,6 +15,7 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/lionsoul2014/ip2region/binding/golang/xdb"
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 )
 
 var (
@@ -26,8 +27,8 @@ var (
 )
 
 const (
-	ip2regionIPv4RemoteFile = "https://github.com/lionsoul2014/ip2region/raw/master/data/ip2region_v4.xdb"
-	ip2regionIPv6RemoteFile = "https://github.com/lionsoul2014/ip2region/raw/master/data/ip2region_v6.xdb"
+	ip2regionIPv4RemoteFile = "https://gh.dev.438250.xyz/https://github.com/lionsoul2014/ip2region/raw/master/data/ip2region_v4.xdb"
+	ip2regionIPv6RemoteFile = "https://gh.dev.438250.xyz/https://github.com/lionsoul2014/ip2region/raw/master/data/ip2region_v6.xdb"
 )
 
 func init() {
@@ -57,6 +58,7 @@ type GeoCity struct {
 	httpClient    *http.Client
 	cacheOnce     *sync.Once
 	updateOnce    *sync.Once
+	sfGroup       *singleflight.Group
 }
 
 // cityCache is a TTL cache for city match results.
@@ -80,6 +82,7 @@ func (g *GeoCity) Provision(ctx caddy.Context) error {
 	g.logger = ctx.Logger(g)
 	g.cacheOnce = new(sync.Once)
 	g.updateOnce = new(sync.Once)
+	g.sfGroup = new(singleflight.Group)
 
 	if g.Mode == "" {
 		g.Mode = "allow"
@@ -174,6 +177,15 @@ func (g *GeoCity) loadDatabase(source, cacheFile string, version *xdb.Version, s
 			return fmt.Errorf("local file not found: %s", source)
 		}
 		if err := copyFile(source, cacheFile); err != nil {
+			g.logger.Debug("failed to copy database to cache, using source directly",
+				zap.String("source", source),
+				zap.Error(err))
+			// Update struct field when using source directly
+			if version == xdb.IPv4 {
+				g.localIPv4File = source
+			} else {
+				g.localIPv6File = source
+			}
 			cacheFile = source
 		}
 	}
@@ -206,19 +218,25 @@ func (g *GeoCity) updateDatabase(source, localFile string, version *xdb.Version,
 	defer cancel()
 
 	if err := downloadFile(ctx, g.httpClient, source, tempFile); err != nil {
-		os.Remove(tempFile)
+		if rmErr := os.Remove(tempFile); rmErr != nil {
+			g.logger.Debug("failed to remove temp file", zap.String("file", tempFile), zap.Error(rmErr))
+		}
 		return fmt.Errorf("download %s database failed: %v", label, err)
 	}
 
 	tempSearcher, err := xdb.NewWithFileOnly(version, tempFile)
 	if err != nil {
-		os.Remove(tempFile)
+		if rmErr := os.Remove(tempFile); rmErr != nil {
+			g.logger.Debug("failed to remove temp file", zap.String("file", tempFile), zap.Error(rmErr))
+		}
 		return fmt.Errorf("invalid %s database file: %v", label, err)
 	}
 	tempSearcher.Close()
 
 	if err := os.Rename(tempFile, localFile); err != nil {
-		os.Remove(tempFile)
+		if rmErr := os.Remove(tempFile); rmErr != nil {
+			g.logger.Debug("failed to remove temp file", zap.String("file", tempFile), zap.Error(rmErr))
+		}
 		return fmt.Errorf("replace %s database file failed: %v", label, err)
 	}
 
@@ -399,68 +417,85 @@ func (g *GeoCity) matchLocation(ip net.IP) bool {
 	}
 
 	ipStr := ip.String()
+
+	// Check cache first
 	if g.cache != nil {
 		if matched, found := g.cache.Get(ipStr); found {
 			return matched
 		}
 	}
 
-	g.lock.RLock()
-	defer g.lock.RUnlock()
-
-	var searcher *xdb.Searcher
-	if ip.To4() != nil {
-		searcher = g.searcherIPv4
-		if searcher == nil {
-			g.logger.Debug("IPv4 database not available", zap.String("ip", ipStr))
-			return false
+	// Use singleflight to deduplicate concurrent requests for the same IP
+	result, _, _ := g.sfGroup.Do(ipStr, func() (any, error) {
+		// Double-check cache after acquiring singleflight
+		if g.cache != nil {
+			if matched, found := g.cache.Get(ipStr); found {
+				return matched, nil
+			}
 		}
-	} else {
-		searcher = g.searcherIPv6
-		if searcher == nil {
-			g.logger.Debug("IPv6 database not available", zap.String("ip", ipStr))
-			return false
+
+		g.lock.RLock()
+		defer g.lock.RUnlock()
+
+		var searcher *xdb.Searcher
+		if ip.To4() != nil {
+			searcher = g.searcherIPv4
+			if searcher == nil {
+				g.logger.Debug("IPv4 database not available", zap.String("ip", ipStr))
+				return false, nil
+			}
+		} else {
+			searcher = g.searcherIPv6
+			if searcher == nil {
+				g.logger.Debug("IPv6 database not available", zap.String("ip", ipStr))
+				return false, nil
+			}
 		}
-	}
 
-	region, err := searcher.SearchByStr(ipStr)
-	if err != nil {
-		g.logger.Debug("failed to search IP location", zap.String("ip", ipStr), zap.Error(err))
-		return false
-	}
+		region, err := searcher.SearchByStr(ipStr)
+		if err != nil {
+			g.logger.Debug("failed to search IP location", zap.String("ip", ipStr), zap.Error(err))
+			return false, nil
+		}
 
-	// ip2region format: Country|Region|Province|City|ISP
-	parts := strings.Split(region, "|")
-	if len(parts) < 4 {
-		g.logger.Debug("invalid region format", zap.String("region", region))
-		return false
-	}
+		// ip2region format: Country|Region|Province|City|ISP
+		parts := strings.Split(region, "|")
+		if len(parts) < 4 {
+			g.logger.Debug("invalid region format", zap.String("region", region))
+			return false, nil
+		}
 
-	country := strings.TrimSpace(parts[0])
-	province := strings.TrimSpace(parts[2])
-	city := strings.TrimSpace(parts[3])
+		country := strings.TrimSpace(parts[0])
+		province := strings.TrimSpace(parts[2])
+		city := strings.TrimSpace(parts[3])
 
-	var matched bool
-	if country != "中国" {
-		matched = g.Mode == "deny"
-	} else {
-		g.logger.Debug("IP location info",
+		g.logger.Debug("IP location query",
 			zap.String("ip", ipStr),
+			zap.String("country", country),
 			zap.String("province", province),
-			zap.String("city", city))
+			zap.String("city", city),
+			zap.String("region", region))
 
-		switch g.Mode {
-		case "allow":
-			matched = g.matchList(province, city)
-		case "deny":
-			matched = !g.matchList(province, city)
+		var matched bool
+		if country != "中国" {
+			matched = g.Mode == "deny"
+		} else {
+			switch g.Mode {
+			case "allow":
+				matched = g.matchList(province, city)
+			case "deny":
+				matched = !g.matchList(province, city)
+			}
 		}
-	}
 
-	if g.cache != nil {
-		g.cache.Set(ipStr, matched)
-	}
+		if g.cache != nil {
+			g.cache.Set(ipStr, matched)
+		}
 
+		return matched, nil
+	})
+
+	matched, _ := result.(bool)
 	return matched
 }
 
@@ -490,20 +525,25 @@ func (g *GeoCity) MatchWithError(r *http.Request) (bool, error) {
 }
 
 func (g *GeoCity) Match(r *http.Request) bool {
-	if remoteIP := getIP(r.RemoteAddr); remoteIP != nil && g.matchLocation(remoteIP) {
-		return true
-	}
-
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if clientIP := getIP(strings.Split(xff, ",")[0]); clientIP != nil {
-			return g.matchLocation(clientIP)
+	// Use Caddy's ClientIPVarKey which respects trusted_proxies configuration
+	if clientIP, ok := caddyhttp.GetVar(r.Context(), caddyhttp.ClientIPVarKey).(string); ok && clientIP != "" {
+		if ip := getIP(clientIP); ip != nil {
+			matched := g.matchLocation(ip)
+			g.logger.Debug("geocity match result",
+				zap.String("client_ip", clientIP),
+				zap.Bool("matched", matched))
+			return matched
 		}
 	}
-
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		if clientIP := getIP(xri); clientIP != nil {
-			return g.matchLocation(clientIP)
-		}
+	g.logger.Debug("ClientIPVarKey not set, using RemoteAddr")
+	// Fallback to RemoteAddr if ClientIPVarKey is not set
+	if remoteIP := getIP(r.RemoteAddr); remoteIP != nil {
+		matched := g.matchLocation(remoteIP)
+		g.logger.Debug("geocity match result (fallback)",
+			zap.String("remote_addr", r.RemoteAddr),
+			zap.String("ip", remoteIP.String()),
+			zap.Bool("matched", matched))
+		return matched
 	}
 
 	return false
