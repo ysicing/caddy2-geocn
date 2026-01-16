@@ -40,8 +40,9 @@ type GeoCity struct {
 	Timeout      caddy.Duration `json:"timeout,omitempty"`
 	IPv4Source   string         `json:"ipv4_source,omitempty"`
 	IPv6Source   string         `json:"ipv6_source,omitempty"`
-	Provinces    []string       `json:"provinces,omitempty"`
-	Cities       []string       `json:"cities,omitempty"`
+	Regions      []string       `json:"regions,omitempty"`
+	Provinces    []string       `json:"provinces,omitempty"` // Deprecated: use Regions instead
+	Cities       []string       `json:"cities,omitempty"`    // Deprecated: use Regions instead
 	Mode         string         `json:"mode,omitempty"`
 	EnableCache  *bool          `json:"enable_cache,omitempty"`
 	CacheTTL     caddy.Duration `json:"cache_ttl,omitempty"`
@@ -361,6 +362,12 @@ func (g *GeoCity) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.Errf("mode must be 'allow' or 'deny', got '%s'", mode)
 				}
 				g.Mode = mode
+			case "regions":
+				args := d.RemainingArgs()
+				if len(args) == 0 {
+					return d.ArgErr()
+				}
+				g.Regions = append(g.Regions, args...)
 			case "provinces":
 				args := d.RemainingArgs()
 				if len(args) == 0 {
@@ -460,21 +467,20 @@ func (g *GeoCity) matchLocation(ip net.IP) bool {
 
 		// ip2region format: Country|Region|Province|City|ISP
 		parts := strings.Split(region, "|")
-		if len(parts) < 4 {
-			g.logger.Debug("invalid region format", zap.String("region", region))
-			return false, nil
-		}
-
 		country := strings.TrimSpace(parts[0])
-		province := strings.TrimSpace(parts[2])
-		city := strings.TrimSpace(parts[3])
+		if len(parts) >= 4 {
+			province := strings.TrimSpace(parts[2])
+			city := strings.TrimSpace(parts[3])
+			g.logger.Debug("IP location query",
+				zap.String("ip", ipStr),
+				zap.String("country", country),
+				zap.String("province", province),
+				zap.String("city", city),
+				zap.String("region", region))
 
-		g.logger.Debug("IP location query",
-			zap.String("ip", ipStr),
-			zap.String("country", country),
-			zap.String("province", province),
-			zap.String("city", city),
-			zap.String("region", region))
+		} else if len(parts) < 4 {
+			g.logger.Debug("invalid region format", zap.String("region", region))
+		}
 
 		var matched bool
 		if country != "中国" {
@@ -482,9 +488,9 @@ func (g *GeoCity) matchLocation(ip net.IP) bool {
 		} else {
 			switch g.Mode {
 			case "allow":
-				matched = g.matchList(province, city)
+				matched = g.matchRegion(region)
 			case "deny":
-				matched = !g.matchList(province, city)
+				matched = !g.matchRegion(region)
 			}
 		}
 
@@ -499,20 +505,21 @@ func (g *GeoCity) matchLocation(ip net.IP) bool {
 	return matched
 }
 
-// matchList checks if province or city matches the configured lists.
-func (g *GeoCity) matchList(province, city string) bool {
-	if len(g.Provinces) == 0 && len(g.Cities) == 0 {
-		return true
+// matchRegion checks if the region string contains any of the configured keywords.
+// It searches in the full region string (e.g., "中国|0|北京|北京市|联通").
+func (g *GeoCity) matchRegion(region string) bool {
+	// Merge all keywords: Regions + Provinces + Cities (for backward compatibility)
+	keywords := make([]string, 0, len(g.Regions)+len(g.Provinces)+len(g.Cities))
+	keywords = append(keywords, g.Regions...)
+	keywords = append(keywords, g.Provinces...)
+	keywords = append(keywords, g.Cities...)
+
+	if len(keywords) == 0 {
+		return true // No filter configured, match all Chinese IPs
 	}
 
-	for _, p := range g.Provinces {
-		if strings.Contains(province, p) || strings.Contains(p, province) {
-			return true
-		}
-	}
-
-	for _, c := range g.Cities {
-		if strings.Contains(city, c) || strings.Contains(c, city) {
+	for _, kw := range keywords {
+		if strings.Contains(region, kw) {
 			return true
 		}
 	}

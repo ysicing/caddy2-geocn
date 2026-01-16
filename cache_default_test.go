@@ -3,78 +3,70 @@ package geocn
 import (
 	"testing"
 	"time"
-
-	"github.com/caddyserver/caddy/v2"
 )
 
-func TestCacheDefaultEnabled(t *testing.T) {
-	// 测试 GeoCN 默认启用缓存
-	t.Run("GeoCN default cache", func(t *testing.T) {
-		g := &GeoCN{}
+func TestIPCacheBehavior(t *testing.T) {
+	t.Run("cache hit and miss", func(t *testing.T) {
+		cache := newIPCache(100, 5*time.Minute)
 
-		// 模拟 Provision 中的默认值设置
-		if g.EnableCache == nil {
-			enableCache := true
-			g.EnableCache = &enableCache
+		// Cache miss
+		_, found := cache.Get("192.168.1.1")
+		if found {
+			t.Error("Expected cache miss for new key")
 		}
 
-		if g.EnableCache == nil || !*g.EnableCache {
-			t.Error("Expected cache to be enabled by default for GeoCN")
+		// Set value
+		cache.Set("192.168.1.1", "CN")
+
+		// Cache hit
+		country, found := cache.Get("192.168.1.1")
+		if !found {
+			t.Error("Expected cache hit after Set")
 		}
-	})
-
-	// 测试 GeoCity 默认启用缓存
-	t.Run("GeoCity default cache", func(t *testing.T) {
-		g := &GeoCity{}
-
-		// 模拟 Provision 中的默认值设置
-		if g.EnableCache == nil {
-			enableCache := true
-			g.EnableCache = &enableCache
-		}
-
-		if g.EnableCache == nil || !*g.EnableCache {
-			t.Error("Expected cache to be enabled by default for GeoCity")
+		if country != "CN" {
+			t.Errorf("Expected country CN, got %s", country)
 		}
 	})
 
-	// 测试显式禁用缓存
-	t.Run("Explicitly disable cache", func(t *testing.T) {
-		enableCache := false
-		g := &GeoCN{
-			EnableCache: &enableCache,
+	t.Run("cache TTL expiration", func(t *testing.T) {
+		cache := newIPCache(100, 50*time.Millisecond)
+
+		cache.Set("10.0.0.1", "US")
+
+		// Should hit immediately
+		_, found := cache.Get("10.0.0.1")
+		if !found {
+			t.Error("Expected cache hit before TTL expiration")
 		}
 
-		if g.EnableCache == nil || *g.EnableCache {
-			t.Error("Expected cache to be disabled when explicitly set to false")
+		// Wait for TTL to expire
+		time.Sleep(60 * time.Millisecond)
+
+		// Should miss after TTL
+		_, found = cache.Get("10.0.0.1")
+		if found {
+			t.Error("Expected cache miss after TTL expiration")
 		}
 	})
 
-	// 测试缓存默认参数
-	t.Run("Cache default parameters", func(t *testing.T) {
-		g := &GeoCN{}
+	t.Run("cache max size eviction", func(t *testing.T) {
+		cache := newIPCache(3, 5*time.Minute)
 
-		// 模拟 Provision 中的默认值设置
-		if g.EnableCache == nil {
-			enableCache := true
-			g.EnableCache = &enableCache
+		cache.Set("1.1.1.1", "A")
+		cache.Set("2.2.2.2", "B")
+		cache.Set("3.3.3.3", "C")
+
+		// All should be present
+		if _, found := cache.Get("1.1.1.1"); !found {
+			t.Error("Expected 1.1.1.1 to be in cache")
 		}
 
-		if *g.EnableCache {
-			if g.CacheTTL == 0 {
-				g.CacheTTL = caddy.Duration(5 * time.Minute)
-			}
-			if g.CacheMaxSize == 0 {
-				g.CacheMaxSize = 10000
-			}
-		}
+		// Add one more, should evict oldest
+		cache.Set("4.4.4.4", "D")
 
-		if time.Duration(g.CacheTTL) != 5*time.Minute {
-			t.Errorf("Expected default cache TTL to be 5 minutes, got %v", time.Duration(g.CacheTTL))
-		}
-
-		if g.CacheMaxSize != 10000 {
-			t.Errorf("Expected default cache max size to be 10000, got %d", g.CacheMaxSize)
+		// Newest should be present
+		if _, found := cache.Get("4.4.4.4"); !found {
+			t.Error("Expected 4.4.4.4 to be in cache")
 		}
 	})
 }

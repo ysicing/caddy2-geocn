@@ -18,8 +18,8 @@ xcaddy build --with github.com/ysicing/caddy2-geocn
 - 🇨🇳 识别中国 IP 地址
 - 🧠 IP 获取：优先使用 Caddy 的 `ClientIPVarKey`（需配置 `trusted_proxies`），回退到 `RemoteAddr`
 - 🔄 自动更新 GeoIP2 数据库（默认每 24h 检查）
-- 🗄️ 查询结果缓存（默认启用：TTL 5m，容量 10000；可在 Caddyfile 用 `cache off` 关闭）
-- 🚀 高性能 IP 地理位置查询
+- 🗄️ 查询结果缓存（默认启用：TTL 5m，容量 10000）
+- 🚀 全局单例：所有站点共享同一数据库和缓存，资源高效
 
 ### GeoCity 模块
 - 🏙️ 支持省份和城市级别的访问控制
@@ -33,6 +33,10 @@ xcaddy build --with github.com/ysicing/caddy2-geocn
 
 ### GeoCN - 中国 IP 识别
 
+GeoCN 采用全局单例模式，配置在全局选项块中，所有站点共享。
+
+#### 基础用法（使用默认配置）
+
 ```caddyfile
 {
     # 如果在反向代理后面，需要配置 trusted_proxies
@@ -43,9 +47,7 @@ xcaddy build --with github.com/ysicing/caddy2-geocn
 
 # 只允许中国 IP 访问
 china.example.com {
-    @china_ip {
-        geocn
-    }
+    @china_ip geocn
 
     handle @china_ip {
         file_server
@@ -57,46 +59,59 @@ china.example.com {
 }
 ```
 
-### 缓存与更新
-
-- 默认缓存（两模块一致）
-  - 开启：默认启用
-  - TTL：5m（`cache ttl 5m` 可调整）
-  - 容量：10000（`cache size 10000` 可调整）
-  - 关闭：Caddyfile 中使用 `cache off`，或 JSON 使用 `enable_cache: false`
-  - 配置 `size <= 0` 时按默认容量初始化（等同未显式设置）
-
-- 更新策略（两模块一致）
-  - 默认每 24 小时检查更新（`interval 24h` 可调整）
-  - 远端 HEAD 返回 Last-Modified 时：与本地文件 mtime 比较，变新则更新
-  - 远端缺少 Last-Modified 时：按 `interval` 与本地 mtime 判断是否需要刷新
-
-示例：
+#### 自定义全局配置
 
 ```caddyfile
-:8080 {
-    @cn {
-        geocn {
-            # 更新间隔与超时
-            interval 24h
-            timeout 30s
-
-            # 缓存（默认已启用，以下为显式设置）
-            cache ttl 10m size 20000
-            # 关闭缓存：
-            # cache off
-        }
+{
+    # GeoCN 全局配置（所有站点共享）
+    geocn {
+        interval 24h          # 数据库更新检查间隔
+        timeout 30s           # 下载超时
+        cache ttl 10m size 20000  # 缓存配置
+        # cache off           # 关闭缓存
+        # source https://example.com/Country.mmdb  # 自定义数据源
     }
 
+    servers {
+        trusted_proxies static 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+    }
+}
+
+# 站点 1
+site1.example.com {
+    @cn geocn
     handle @cn {
         respond "Welcome from China!"
     }
-
     handle {
         respond "Access denied" 403
     }
 }
+
+# 站点 2（共享同一 GeoCN 实例）
+site2.example.com {
+    @cn geocn
+    handle @cn {
+        reverse_proxy backend:8080
+    }
+    handle {
+        respond "仅限中国访问" 403
+    }
+}
 ```
+
+### 缓存与更新
+
+- 默认缓存
+  - 开启：默认启用
+  - TTL：5m（`cache ttl 5m` 可调整）
+  - 容量：10000（`cache size 10000` 可调整）
+  - 关闭：Caddyfile 中使用 `cache off`，或 JSON 使用 `enable_cache: false`
+
+- 更新策略
+  - 默认每 24 小时检查更新（`interval 24h` 可调整）
+  - 远端 HEAD 返回 Last-Modified 时：与本地文件 mtime 比较，变新则更新
+  - 远端缺少 Last-Modified 时：按 `interval` 与本地 mtime 判断是否需要刷新
 
 ### GeoCity - 省市地区控制
 
@@ -108,16 +123,18 @@ china.example.com {
     }
 }
 
-# 只允许北京和上海访问
+# 只允许北京和上海访问（推荐使用 regions）
 city.example.com {
-    @allowed_cities {
+    @allowed {
         geocity {
             mode allow
-            cities "北京" "上海"
+            regions "北京" "上海"
+            # 在整个 region 字符串中搜索
+            # 例如 "中国|0|北京|北京市|联通" 会匹配 "北京"
         }
     }
 
-    handle @allowed_cities {
+    handle @allowed {
         reverse_proxy backend:8080
     }
 
@@ -128,14 +145,14 @@ city.example.com {
 
 # 拒绝特定省份访问
 province.example.com {
-    @blocked_provinces {
+    @blocked {
         geocity {
             mode deny
-            provinces "河北" "山东"
+            regions "河北" "山东"
         }
     }
 
-    handle @blocked_provinces {
+    handle @blocked {
         respond "该地区暂不提供服务" 403
     }
 
@@ -154,15 +171,16 @@ province.example.com {
 - 缓存：默认启用（TTL 5m，容量 10000），可 `cache off` 关闭
 - IP 获取：优先使用 Caddy 的 `ClientIPVarKey`（需配置 `trusted_proxies`），回退到 `RemoteAddr`
 
-配置项（精简）：
+配置项：
 - `mode`：`allow`（默认）或 `deny`
-- `provinces`：省份列表（按模式决定允许/拒绝），支持包含匹配
-- `cities`：城市列表（按模式决定允许/拒绝），支持包含匹配
+- `regions`：地区关键词列表（推荐），在整个 region 字符串中搜索匹配
+- `provinces`：省份列表（已废弃，建议使用 regions）
+- `cities`：城市列表（已废弃，建议使用 regions）
 - `ipv4_source`：IPv4 数据库源（HTTP URL 或本地文件）
 - `ipv6_source`：IPv6 数据库源（HTTP URL 或本地文件）
-- `interval`：更新检查间隔（默认 `24h`，仅对 HTTP 源生效；远端缺少 Last-Modified 时按该值回退判断）
+- `interval`：更新检查间隔（默认 `24h`，仅对 HTTP 源生效）
 - `timeout`：下载/检查超时（默认 `30s`）
-- `cache`：默认启用；可配置 `cache ttl <duration>`、`cache size <number>`；`size <= 0` 视为默认容量
+- `cache`：默认启用；可配置 `cache ttl <duration>`、`cache size <number>`
 
 更多配置示例：
 
@@ -230,9 +248,7 @@ geocity {
 }
 
 example.com {
-    @cn {
-        geocn
-    }
+    @cn geocn
     handle @cn {
         respond "Welcome from China!"
     }

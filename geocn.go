@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/oschwald/geoip2-golang/v2"
 	"go.uber.org/zap"
@@ -21,17 +23,24 @@ var (
 	_ caddy.Module                      = (*GeoCN)(nil)
 	_ caddyhttp.RequestMatcherWithError = (*GeoCN)(nil)
 	_ caddy.Provisioner                 = (*GeoCN)(nil)
-	_ caddy.CleanerUpper                = (*GeoCN)(nil)
 	_ caddyfile.Unmarshaler             = (*GeoCN)(nil)
+
+	_ caddy.Module       = (*GeoCNApp)(nil)
+	_ caddy.App          = (*GeoCNApp)(nil)
+	_ caddy.Provisioner  = (*GeoCNApp)(nil)
+	_ caddy.CleanerUpper = (*GeoCNApp)(nil)
 )
 
 const remotefile = "https://gh.dev.438250.xyz/https://github.com/Hackl0us/GeoIP2-CN/raw/release/Country.mmdb"
 
 func init() {
+	caddy.RegisterModule(GeoCNApp{})
 	caddy.RegisterModule(GeoCN{})
+	httpcaddyfile.RegisterGlobalOption("geocn", parseGeoCNAppCaddyfile)
 }
 
-type GeoCN struct {
+// GeoCNApp is the global app module that manages shared GeoIP resources.
+type GeoCNApp struct {
 	Interval     caddy.Duration `json:"interval,omitempty"`
 	Timeout      caddy.Duration `json:"timeout,omitempty"`
 	Source       string         `json:"source,omitempty"`
@@ -39,16 +48,22 @@ type GeoCN struct {
 	CacheTTL     caddy.Duration `json:"cache_ttl,omitempty"`
 	CacheMaxSize int            `json:"cache_max_size,omitempty"`
 
-	ctx        caddy.Context
-	lock       *sync.RWMutex
-	dbReader   *geoip2.Reader
-	logger     *zap.Logger
-	cache      *ipCache
-	localFile  string
-	httpClient *http.Client
-	cacheOnce  *sync.Once
-	updateOnce *sync.Once
-	sfGroup    *singleflight.Group
+	ctx           caddy.Context
+	lock          *sync.RWMutex
+	dbReader      *geoip2.Reader
+	logger        *zap.Logger
+	cache         *ipCache
+	localFile     string
+	httpClient    *http.Client
+	sfGroup       *singleflight.Group
+	cacheOnce     sync.Once
+	updateOnce    sync.Once
+}
+
+// GeoCN is a lightweight matcher that references the global GeoCNApp.
+type GeoCN struct {
+	app    *GeoCNApp
+	logger *zap.Logger
 }
 
 // ipCache is a TTL cache for IP country lookups.
@@ -59,6 +74,13 @@ func newIPCache(maxSize int, ttl time.Duration) *ipCache {
 	return NewCache[string](maxSize, ttl)
 }
 
+func (GeoCNApp) CaddyModule() caddy.ModuleInfo {
+	return caddy.ModuleInfo{
+		ID:  "geocn",
+		New: func() caddy.Module { return new(GeoCNApp) },
+	}
+}
+
 func (GeoCN) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "http.matchers.geocn",
@@ -66,67 +88,22 @@ func (GeoCN) CaddyModule() caddy.ModuleInfo {
 	}
 }
 
-func (m *GeoCN) validSource(host string) bool {
-	if host == "" {
-		return false
-	}
-
-	nip, err := netip.ParseAddr(host)
-	if err != nil || !nip.IsValid() || nip.IsLoopback() || nip.IsLinkLocalUnicast() ||
-		nip.IsLinkLocalMulticast() || nip.IsPrivate() || nip.IsUnspecified() || nip.IsMulticast() {
-		return false
-	}
-
-	// Check cache first
-	if m.cache != nil {
-		if country, found := m.cache.Get(host); found {
-			return country == "CN"
-		}
-	}
-
-	// Use singleflight to deduplicate concurrent requests for the same IP
-	result, _, _ := m.sfGroup.Do(host, func() (any, error) {
-		// Double-check cache after acquiring singleflight
-		if m.cache != nil {
-			if country, found := m.cache.Get(host); found {
-				return country, nil
-			}
-		}
-
-		m.lock.RLock()
-		defer m.lock.RUnlock()
-
-		if m.dbReader == nil {
-			return "", nil
-		}
-
-		record, err := m.dbReader.Country(nip)
-		if err != nil || record == nil || !record.HasData() {
-			return "", nil
-		}
-
-		country := record.Country.ISOCode
-		if m.cache != nil && country != "" {
-			m.cache.Set(host, country)
-		}
-
-		return country, nil
-	})
-
-	country, _ := result.(string)
-	return country == "CN"
+func (app *GeoCNApp) Start() error {
+	return nil
 }
 
-func (m *GeoCN) Provision(ctx caddy.Context) error {
-	m.ctx = ctx
-	m.lock = new(sync.RWMutex)
-	m.logger = ctx.Logger(m)
-	m.cacheOnce = new(sync.Once)
-	m.updateOnce = new(sync.Once)
-	m.sfGroup = new(singleflight.Group)
+func (app *GeoCNApp) Stop() error {
+	return nil
+}
 
-	if m.Source == "" {
-		m.Source = remotefile
+func (app *GeoCNApp) Provision(ctx caddy.Context) error {
+	app.ctx = ctx
+	app.lock = new(sync.RWMutex)
+	app.logger = ctx.Logger(app)
+	app.sfGroup = new(singleflight.Group)
+
+	if app.Source == "" {
+		app.Source = remotefile
 	}
 
 	caddyDir := caddy.AppDataDir()
@@ -134,118 +111,118 @@ func (m *GeoCN) Provision(ctx caddy.Context) error {
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		return fmt.Errorf("failed to create cache directory: %v", err)
 	}
-	m.localFile = filepath.Join(cacheDir, "Country.mmdb")
+	app.localFile = filepath.Join(cacheDir, "Country.mmdb")
 
-	if m.Timeout == 0 {
-		m.Timeout = caddy.Duration(30 * time.Second)
+	if app.Timeout == 0 {
+		app.Timeout = caddy.Duration(30 * time.Second)
 	}
-	m.httpClient = newHTTPClient(time.Duration(m.Timeout))
+	app.httpClient = newHTTPClient(time.Duration(app.Timeout))
 
-	if m.EnableCache == nil {
+	if app.EnableCache == nil {
 		enableCache := true
-		m.EnableCache = &enableCache
+		app.EnableCache = &enableCache
 	}
 
-	if *m.EnableCache {
-		if m.CacheMaxSize <= 0 {
-			m.CacheMaxSize = 10000
+	if *app.EnableCache {
+		if app.CacheMaxSize <= 0 {
+			app.CacheMaxSize = 10000
 		}
-		if m.CacheTTL == 0 {
-			m.CacheTTL = caddy.Duration(5 * time.Minute)
+		if app.CacheTTL == 0 {
+			app.CacheTTL = caddy.Duration(5 * time.Minute)
 		}
-		m.cache = newIPCache(m.CacheMaxSize, time.Duration(m.CacheTTL))
-		m.cacheOnce.Do(func() {
-			go m.cache.Cleanup(m.ctx)
+		app.cache = newIPCache(app.CacheMaxSize, time.Duration(app.CacheTTL))
+		app.cacheOnce.Do(func() {
+			go app.cache.Cleanup(app.ctx)
 		})
-		m.logger.Info("IP cache enabled",
-			zap.Duration("ttl", time.Duration(m.CacheTTL)),
-			zap.Int("max_size", m.CacheMaxSize))
+		app.logger.Info("IP cache enabled",
+			zap.Duration("ttl", time.Duration(app.CacheTTL)),
+			zap.Int("max_size", app.CacheMaxSize))
 	}
 
-	if err := m.loadDatabase(); err != nil {
+	if err := app.loadDatabase(); err != nil {
 		return fmt.Errorf("failed to load GeoIP database: %v", err)
 	}
 
-	m.updateOnce.Do(func() {
-		go m.periodicUpdate()
+	app.updateOnce.Do(func() {
+		go app.periodicUpdate()
 	})
 	return nil
 }
 
-func (m *GeoCN) loadDatabase() error {
-	if reader, err := geoip2.Open(m.localFile); err == nil {
-		m.lock.Lock()
-		oldReader := m.dbReader
-		m.dbReader = reader
-		m.lock.Unlock()
+func (app *GeoCNApp) loadDatabase() error {
+	if reader, err := geoip2.Open(app.localFile); err == nil {
+		app.lock.Lock()
+		oldReader := app.dbReader
+		app.dbReader = reader
+		app.lock.Unlock()
 		if oldReader != nil {
 			oldReader.Close()
 		}
-		m.logger.Debug("loaded database from cache",
-			zap.String("cache", m.localFile),
-			zap.String("source", m.Source))
+		app.logger.Debug("loaded database from cache",
+			zap.String("cache", app.localFile),
+			zap.String("source", app.Source))
 		return nil
 	}
 
-	if isHTTPSource(m.Source) {
-		ctx, cancel := getContextWithTimeout(m.ctx, m.Timeout)
+	if isHTTPSource(app.Source) {
+		ctx, cancel := getContextWithTimeout(app.ctx, app.Timeout)
 		defer cancel()
-		if err := downloadFile(ctx, m.httpClient, m.Source, m.localFile); err != nil {
-			return fmt.Errorf("download from %s: %w", m.Source, err)
+		if err := downloadFile(ctx, app.httpClient, app.Source, app.localFile); err != nil {
+			return fmt.Errorf("download from %s: %w", app.Source, err)
 		}
 	} else {
-		if _, err := os.Stat(m.Source); err != nil {
-			return fmt.Errorf("local file not found: %s", m.Source)
+		if _, err := os.Stat(app.Source); err != nil {
+			return fmt.Errorf("local file not found: %s", app.Source)
 		}
-		if err := copyFile(m.Source, m.localFile); err != nil {
-			m.logger.Debug("failed to copy database to cache, using source directly",
-				zap.String("source", m.Source),
+		if err := copyFile(app.Source, app.localFile); err != nil {
+			app.logger.Debug("failed to copy database to cache, using source directly",
+				zap.String("source", app.Source),
 				zap.Error(err))
-			m.localFile = m.Source
+			app.localFile = app.Source
 		}
 	}
 
-	reader, err := geoip2.Open(m.localFile)
+	reader, err := geoip2.Open(app.localFile)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
 
-	m.lock.Lock()
-	oldReader := m.dbReader
-	m.dbReader = reader
-	m.lock.Unlock()
+	app.lock.Lock()
+	oldReader := app.dbReader
+	app.dbReader = reader
+	app.lock.Unlock()
 	if oldReader != nil {
 		oldReader.Close()
 	}
 
-	m.logger.Info("loaded database",
-		zap.String("source", m.Source),
-		zap.String("cache", m.localFile))
+	app.logger.Info("loaded database",
+		zap.String("source", app.Source),
+		zap.String("cache", app.localFile))
 	return nil
 }
 
-func (m *GeoCN) checkNeedUpdate() (bool, error) {
-	if !isHTTPSource(m.Source) {
+func (app *GeoCNApp) checkNeedUpdate() (bool, error) {
+	if !isHTTPSource(app.Source) {
 		return false, nil
 	}
 
-	ctx, cancel := getContextWithTimeout(m.ctx, m.Timeout)
+	ctx, cancel := getContextWithTimeout(app.ctx, app.Timeout)
 	defer cancel()
-	return checkRemoteUpdate(ctx, m.httpClient, m.Source, m.localFile, time.Duration(m.Interval))
+	return checkRemoteUpdate(ctx, app.httpClient, app.Source, app.localFile, time.Duration(app.Interval))
 }
 
-func (m *GeoCN) updateGeoFile() error {
-	if !isHTTPSource(m.Source) {
-		return m.loadDatabase()
+func (app *GeoCNApp) updateGeoFile() error {
+	if !isHTTPSource(app.Source) {
+		return app.loadDatabase()
 	}
 
-	tempFile := m.localFile + ".temp"
-	ctx, cancel := getContextWithTimeout(m.ctx, m.Timeout)
+	tempFile := app.localFile + ".temp"
+	ctx, cancel := getContextWithTimeout(app.ctx, app.Timeout)
 	defer cancel()
 
-	if err := downloadFile(ctx, m.httpClient, m.Source, tempFile); err != nil {
+	if err := downloadFile(ctx, app.httpClient, app.Source, tempFile); err != nil {
 		if rmErr := os.Remove(tempFile); rmErr != nil {
-			m.logger.Debug("failed to remove temp file", zap.String("file", tempFile), zap.Error(rmErr))
+			app.logger.Debug("failed to remove temp file", zap.String("file", tempFile), zap.Error(rmErr))
 		}
 		return fmt.Errorf("download failed: %v", err)
 	}
@@ -253,135 +230,140 @@ func (m *GeoCN) updateGeoFile() error {
 	tempReader, err := geoip2.Open(tempFile)
 	if err != nil {
 		if rmErr := os.Remove(tempFile); rmErr != nil {
-			m.logger.Debug("failed to remove temp file", zap.String("file", tempFile), zap.Error(rmErr))
+			app.logger.Debug("failed to remove temp file", zap.String("file", tempFile), zap.Error(rmErr))
 		}
 		return fmt.Errorf("invalid database file: %v", err)
 	}
 	tempReader.Close()
 
-	if err := os.Rename(tempFile, m.localFile); err != nil {
+	if err := os.Rename(tempFile, app.localFile); err != nil {
 		if rmErr := os.Remove(tempFile); rmErr != nil {
-			m.logger.Debug("failed to remove temp file", zap.String("file", tempFile), zap.Error(rmErr))
+			app.logger.Debug("failed to remove temp file", zap.String("file", tempFile), zap.Error(rmErr))
 		}
 		return fmt.Errorf("replace database file failed: %v", err)
 	}
 
-	newReader, err := geoip2.Open(m.localFile)
+	newReader, err := geoip2.Open(app.localFile)
 	if err != nil {
 		return fmt.Errorf("open new database file failed: %v", err)
 	}
 
-	m.lock.Lock()
-	oldReader := m.dbReader
-	m.dbReader = newReader
-	m.lock.Unlock()
+	app.lock.Lock()
+	oldReader := app.dbReader
+	app.dbReader = newReader
+	app.lock.Unlock()
 
 	if oldReader != nil {
 		oldReader.Close()
 	}
 
-	m.logger.Info("GeoIP database updated successfully", zap.String("file", m.localFile))
+	app.logger.Info("GeoIP database updated successfully", zap.String("file", app.localFile))
 	return nil
 }
 
-func (m *GeoCN) periodicUpdate() {
-	if m.Interval == 0 {
-		m.Interval = caddy.Duration(24 * time.Hour)
+func (app *GeoCNApp) periodicUpdate() {
+	if app.Interval == 0 {
+		app.Interval = caddy.Duration(24 * time.Hour)
 	}
 
-	ticker := time.NewTicker(time.Duration(m.Interval))
+	ticker := time.NewTicker(time.Duration(app.Interval))
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
-			if ok, err := m.checkNeedUpdate(); err != nil {
-				m.logger.Warn("check update failed", zap.Error(err))
+			if ok, err := app.checkNeedUpdate(); err != nil {
+				app.logger.Warn("check update failed", zap.Error(err))
 			} else if ok {
-				if err := m.updateGeoFile(); err != nil {
-					m.logger.Error("update database failed", zap.Error(err))
+				if err := app.updateGeoFile(); err != nil {
+					app.logger.Error("update database failed", zap.Error(err))
 				}
 			}
-		case <-m.ctx.Done():
+		case <-app.ctx.Done():
 			return
 		}
 	}
 }
 
-func (m *GeoCN) Cleanup() error {
-	m.lock.Lock()
-	defer m.lock.Unlock()
+func (app *GeoCNApp) Cleanup() error {
+	app.lock.Lock()
+	defer app.lock.Unlock()
 
-	if m.dbReader != nil {
-		err := m.dbReader.Close()
-		m.dbReader = nil
+	if app.dbReader != nil {
+		err := app.dbReader.Close()
+		app.dbReader = nil
 		return err
 	}
 	return nil
 }
 
-func (m *GeoCN) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
-	for d.Next() {
-		for n := d.Nesting(); d.NextBlock(n); {
-			switch d.Val() {
-			case "interval":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				val, err := caddy.ParseDuration(d.Val())
-				if err != nil {
-					return err
-				}
-				m.Interval = caddy.Duration(val)
-			case "timeout":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				val, err := caddy.ParseDuration(d.Val())
-				if err != nil {
-					return err
-				}
-				m.Timeout = caddy.Duration(val)
-			case "source":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				m.Source = d.Val()
-			case "cache":
-				if d.NextArg() && d.Val() == "off" {
-					enableCache := false
-					m.EnableCache = &enableCache
-					continue
-				}
-				enableCache := true
-				m.EnableCache = &enableCache
-				for d.NextArg() {
-					switch d.Val() {
-					case "ttl":
-						if d.NextArg() {
-							val, err := caddy.ParseDuration(d.Val())
-							if err != nil {
-								return err
-							}
-							m.CacheTTL = caddy.Duration(val)
-						}
-					case "size":
-						if d.NextArg() {
-							var maxSize int
-							if _, err := fmt.Sscanf(d.Val(), "%d", &maxSize); err != nil {
-								return d.Errf("invalid cache size: %s", d.Val())
-							}
-							if maxSize > 0 {
-								m.CacheMaxSize = maxSize
-							}
-						}
-					}
-				}
-			default:
-				return d.ArgErr()
-			}
+func (app *GeoCNApp) lookupCountry(host string) string {
+	nip, err := netip.ParseAddr(host)
+	if err != nil || !nip.IsValid() || nip.IsLoopback() || nip.IsLinkLocalUnicast() ||
+		nip.IsLinkLocalMulticast() || nip.IsPrivate() || nip.IsUnspecified() || nip.IsMulticast() {
+		return ""
+	}
+
+	// Check cache first
+	if app.cache != nil {
+		if country, found := app.cache.Get(host); found {
+			return country
 		}
 	}
+
+	// Use singleflight to deduplicate concurrent requests for the same IP
+	result, _, _ := app.sfGroup.Do(host, func() (any, error) {
+		// Double-check cache after acquiring singleflight
+		if app.cache != nil {
+			if country, found := app.cache.Get(host); found {
+				return country, nil
+			}
+		}
+
+		app.lock.RLock()
+		defer app.lock.RUnlock()
+
+		if app.dbReader == nil {
+			return "", nil
+		}
+
+		record, err := app.dbReader.Country(nip)
+		if err != nil || record == nil || !record.HasData() {
+			return "", nil
+		}
+
+		country := record.Country.ISOCode
+		if app.cache != nil && country != "" {
+			app.cache.Set(host, country)
+		}
+
+		return country, nil
+	})
+
+	country, _ := result.(string)
+	return country
+}
+
+func (m *GeoCN) Provision(ctx caddy.Context) error {
+	m.logger = ctx.Logger(m)
+
+	appModule, err := ctx.App("geocn")
+	if err != nil {
+		return fmt.Errorf("failed to get geocn app: %v", err)
+	}
+
+	var ok bool
+	m.app, ok = appModule.(*GeoCNApp)
+	if !ok {
+		return fmt.Errorf("geocn app has wrong type")
+	}
+
+	return nil
+}
+
+func (m *GeoCN) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	// The matcher itself has no configuration - all config is on the app
+	d.Next()
 	return nil
 }
 
@@ -390,10 +372,16 @@ func (m *GeoCN) MatchWithError(r *http.Request) (bool, error) {
 }
 
 func (m *GeoCN) Match(r *http.Request) bool {
+	if m.app == nil {
+		m.logger.Error("geocn app not initialized")
+		return false
+	}
+
 	// Use Caddy's ClientIPVarKey which respects trusted_proxies configuration
 	if clientIP, ok := caddyhttp.GetVar(r.Context(), caddyhttp.ClientIPVarKey).(string); ok && clientIP != "" {
 		if host := getHost(clientIP); host != "" {
-			matched := m.validSource(host)
+			country := m.app.lookupCountry(host)
+			matched := country == "CN"
 			m.logger.Debug("geocn match result",
 				zap.String("client_ip", clientIP),
 				zap.Bool("is_cn", matched))
@@ -403,7 +391,8 @@ func (m *GeoCN) Match(r *http.Request) bool {
 	m.logger.Debug("ClientIPVarKey not set, using RemoteAddr")
 	// Fallback to RemoteAddr if ClientIPVarKey is not set
 	if host := getHost(r.RemoteAddr); host != "" {
-		matched := m.validSource(host)
+		country := m.app.lookupCountry(host)
+		matched := country == "CN"
 		m.logger.Debug("geocn match result (fallback)",
 			zap.String("remote_addr", r.RemoteAddr),
 			zap.String("host", host),
@@ -412,4 +401,86 @@ func (m *GeoCN) Match(r *http.Request) bool {
 	}
 
 	return false
+}
+
+// parseGeoCNAppCaddyfile parses the global geocn option.
+//
+//	{
+//	    geocn {
+//	        interval 24h
+//	        timeout 30s
+//	        source https://example.com/Country.mmdb
+//	        cache ttl 5m size 10000
+//	        # or: cache off
+//	    }
+//	}
+func parseGeoCNAppCaddyfile(d *caddyfile.Dispenser, _ any) (any, error) {
+	app := new(GeoCNApp)
+
+	for d.Next() {
+		for n := d.Nesting(); d.NextBlock(n); {
+			switch d.Val() {
+			case "interval":
+				if !d.NextArg() {
+					return nil, d.ArgErr()
+				}
+				val, err := caddy.ParseDuration(d.Val())
+				if err != nil {
+					return nil, err
+				}
+				app.Interval = caddy.Duration(val)
+			case "timeout":
+				if !d.NextArg() {
+					return nil, d.ArgErr()
+				}
+				val, err := caddy.ParseDuration(d.Val())
+				if err != nil {
+					return nil, err
+				}
+				app.Timeout = caddy.Duration(val)
+			case "source":
+				if !d.NextArg() {
+					return nil, d.ArgErr()
+				}
+				app.Source = d.Val()
+			case "cache":
+				if d.NextArg() && d.Val() == "off" {
+					enableCache := false
+					app.EnableCache = &enableCache
+					continue
+				}
+				enableCache := true
+				app.EnableCache = &enableCache
+				for d.NextArg() {
+					switch d.Val() {
+					case "ttl":
+						if d.NextArg() {
+							val, err := caddy.ParseDuration(d.Val())
+							if err != nil {
+								return nil, err
+							}
+							app.CacheTTL = caddy.Duration(val)
+						}
+					case "size":
+						if d.NextArg() {
+							var maxSize int
+							if _, err := fmt.Sscanf(d.Val(), "%d", &maxSize); err != nil {
+								return nil, d.Errf("invalid cache size: %s", d.Val())
+							}
+							if maxSize > 0 {
+								app.CacheMaxSize = maxSize
+							}
+						}
+					}
+				}
+			default:
+				return nil, d.ArgErr()
+			}
+		}
+	}
+
+	return httpcaddyfile.App{
+		Name:  "geocn",
+		Value: caddyconfig.JSON(app, nil),
+	}, nil
 }

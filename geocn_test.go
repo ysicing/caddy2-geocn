@@ -38,7 +38,7 @@ func newTestContext() caddy.Context {
 	return caddy.Context{Context: context.Background()}
 }
 
-func TestGeoCNUpdateGeoFileReplacesReader(t *testing.T) {
+func TestGeoCNAppUpdateGeoFileReplacesReader(t *testing.T) {
 	fixture := fixturePath(t, "Country.mmdb")
 	if _, err := os.Stat(fixture); err != nil {
 		t.Fatalf("fixture missing: %v", err)
@@ -62,7 +62,7 @@ func TestGeoCNUpdateGeoFileReplacesReader(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	module := &GeoCN{
+	app := &GeoCNApp{
 		Timeout:   caddy.Duration(time.Second),
 		Source:    srv.URL,
 		localFile: localFile,
@@ -79,20 +79,20 @@ func TestGeoCNUpdateGeoFileReplacesReader(t *testing.T) {
 		},
 	}
 
-	if err := module.updateGeoFile(); err != nil {
+	if err := app.updateGeoFile(); err != nil {
 		t.Fatalf("updateGeoFile failed: %v", err)
 	}
 
-	if module.dbReader == nil {
+	if app.dbReader == nil {
 		t.Fatal("expected dbReader to be set")
 	}
-	if module.dbReader == initialReader {
+	if app.dbReader == initialReader {
 		t.Fatal("expected dbReader to be replaced")
 	}
 
 	if addr, err := netip.ParseAddr("1.1.1.1"); err != nil {
 		t.Fatalf("parse ip: %v", err)
-	} else if _, err := module.dbReader.Country(addr); err != nil {
+	} else if _, err := app.dbReader.Country(addr); err != nil {
 		t.Fatalf("new reader lookup failed: %v", err)
 	}
 
@@ -114,7 +114,7 @@ func TestGeoCNUpdateGeoFileReplacesReader(t *testing.T) {
 	}
 
 	t.Cleanup(func() {
-		module.dbReader.Close()
+		app.dbReader.Close()
 	})
 }
 

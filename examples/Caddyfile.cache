@@ -3,15 +3,15 @@
 # ========================================
 # GeoCN 模块配置示例（国家级地理位置匹配）
 # ========================================
+# GeoCN 采用全局单例模式，配置在全局选项块中，所有站点共享
 
-# 示例1: 最简配置（默认启用缓存）
+# 示例1: 最简配置（使用默认配置）
+{
+    # 无需显式配置 geocn，使用默认值即可
+}
+
 :8080 {
-    @china {
-        geocn {
-            # 默认使用官方数据源，默认启用缓存
-            # 无需任何额外配置
-        }
-    }
+    @china geocn
 
     handle @china {
         respond "欢迎来自中国的访问！" 200
@@ -22,21 +22,24 @@
     }
 }
 
-# 示例2: 自定义数据源和缓存配置
-:8081 {
-    @china_custom {
-        geocn {
-            # 使用自定义数据源（可以是 HTTP URL 或本地文件）
-            source https://cdn.example.com/Country.mmdb
+# 示例2: 自定义全局配置
+{
+    # GeoCN 全局配置（所有站点共享）
+    geocn {
+        # 使用自定义数据源（可以是 HTTP URL 或本地文件）
+        source https://cdn.example.com/Country.mmdb
 
-            # 更新策略（仅对 HTTP 源有效）
-            interval 24h  # 每24小时检查更新
-            timeout 30s   # 请求超时30秒
+        # 更新策略（仅对 HTTP 源有效）
+        interval 24h  # 每24小时检查更新
+        timeout 30s   # 请求超时30秒
 
-            # 缓存配置（可选，默认已启用）
-            cache ttl 5m size 10000  # TTL 5分钟，最大10000条
-        }
+        # 缓存配置（可选，默认已启用）
+        cache ttl 5m size 10000  # TTL 5分钟，最大10000条
     }
+}
+
+:8081 {
+    @china_custom geocn
 
     handle @china_custom {
         file_server
@@ -48,17 +51,19 @@
 }
 
 # 示例3: 使用本地数据库文件（无自动更新）
-:8082 {
-    @china_local {
-        geocn {
-            # 使用本地文件作为数据源
-            source /opt/geodata/Country.mmdb
+{
+    geocn {
+        # 使用本地文件作为数据源
+        source /opt/geodata/Country.mmdb
 
-            # 本地文件不会自动更新，interval 设置无效
-            # 缓存仍然有效，提升查询性能
-            cache ttl 10m size 20000
-        }
+        # 本地文件不会自动更新，interval 设置无效
+        # 缓存仍然有效，提升查询性能
+        cache ttl 10m size 20000
     }
+}
+
+:8082 {
+    @china_local geocn
 
     handle @china_local {
         respond "中国用户专属内容" 200
@@ -66,12 +71,14 @@
 }
 
 # 示例4: 禁用缓存（不推荐，影响性能）
-:8083 {
-    @china_nocache {
-        geocn {
-            cache off  # 显式禁用缓存
-        }
+{
+    geocn {
+        cache off  # 显式禁用缓存
     }
+}
+
+:8083 {
+    @china_nocache geocn
 
     handle @china_nocache {
         respond "Welcome!" 200
@@ -134,14 +141,16 @@
 # 高级配置示例
 # ========================================
 
-# 示例7: 多层缓存策略
-example.com {
-    # 第一层：国家级缓存（TTL 较长）
-    @china_cache {
-        geocn {
-            cache ttl 30m size 50000  # 30分钟 TTL
-        }
+# 示例7: 多站点共享 GeoCN + 城市级细分
+{
+    geocn {
+        cache ttl 30m size 50000  # 30分钟 TTL
     }
+}
+
+example.com {
+    # 第一层：国家级匹配（使用全局 GeoCN）
+    @china_cache geocn
 
     # 第二层：城市级缓存（TTL 较短）
     @city_cache {
@@ -174,21 +183,20 @@ example.com {
 # ========================================
 # {
 #   "apps": {
+#     "geocn": {
+#       "source": "https://github.com/Hackl0us/GeoIP2-CN/raw/release/Country.mmdb",
+#       "interval": 86400000000000,    // 24小时（纳秒）
+#       "timeout": 30000000000,         // 30秒（纳秒）
+#       "enable_cache": true,           // 启用缓存
+#       "cache_ttl": 300000000000,      // 5分钟（纳秒）
+#       "cache_max_size": 10000         // 最大缓存条目
+#     },
 #     "http": {
 #       "servers": {
 #         "srv0": {
 #           "listen": [":80"],
 #           "routes": [{
-#             "match": [{
-#               "geocn": {
-#                 "source": "https://github.com/Hackl0us/GeoIP2-CN/raw/release/Country.mmdb",
-#                 "interval": 86400000000000,    // 24小时（纳秒）
-#                 "timeout": 30000000000,         // 30秒（纳秒）
-#                 "enable_cache": true,           // 启用缓存
-#                 "cache_ttl": 300000000000,      // 5分钟（纳秒）
-#                 "cache_max_size": 10000         // 最大缓存条目
-#               }
-#             }],
+#             "match": [{ "geocn": {} }],
 #             "handle": [{
 #               "handler": "static_response",
 #               "body": "Welcome from China!"
@@ -227,3 +235,8 @@ example.com {
 #    - HTTP 源：自动下载到 Caddy 数据目录
 #    - 本地文件：直接使用或复制到缓存目录
 #    - 缓存路径：<caddy_data>/geocn/ 或 <caddy_data>/geocity/
+#
+# 6. 全局单例优势（GeoCN）：
+#    - 所有站点共享同一数据库和缓存
+#    - 只有一个更新任务，避免重复下载
+#    - 内存效率高，缓存命中率高
