@@ -461,11 +461,6 @@ func (g *GeoCity) Match(r *http.Request) bool {
 	// Lookup region and get match result
 	region, matched := g.lookupAndMatch(ip)
 
-	// Set variables for use in Caddyfile (e.g., header directive)
-	// Always set these variables so they can be used with {http.vars.geocity_ip}
-	caddyhttp.SetVar(r.Context(), "geocity_ip", ip.String())
-	caddyhttp.SetVar(r.Context(), "geocity_region", region)
-
 	g.logger.Debug("geocity match result",
 		zap.String("client_ip", ipStr),
 		zap.String("region", region),

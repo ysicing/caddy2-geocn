@@ -399,11 +399,6 @@ func (m *GeoCN) Match(r *http.Request) bool {
 	country := m.app.lookupCountry(host)
 	matched := country == "CN"
 
-	// Set variables for use in Caddyfile (e.g., header directive)
-	// Always set these variables so they can be used with {http.vars.geocn_ip}
-	caddyhttp.SetVar(r.Context(), "geocn_ip", host)
-	caddyhttp.SetVar(r.Context(), "geocn_country", country)
-
 	m.logger.Debug("geocn match result",
 		zap.String("client_ip", ip),
 		zap.String("country", country),
