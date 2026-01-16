@@ -50,13 +50,16 @@ func TestCityCache(t *testing.T) {
 	cache := newCityCache(100, 5*time.Minute)
 
 	// Test set and get
-	cache.Set("1.1.1.1", true)
-	matched, found := cache.Get("1.1.1.1")
+	cache.Set("1.1.1.1", cityResult{Region: "中国|0|北京|北京市|联通", Matched: true})
+	result, found := cache.Get("1.1.1.1")
 	if !found {
 		t.Error("expected to find cached entry")
 	}
-	if !matched {
+	if !result.Matched {
 		t.Error("expected matched to be true")
+	}
+	if result.Region != "中国|0|北京|北京市|联通" {
+		t.Errorf("expected region '中国|0|北京|北京市|联通', got '%s'", result.Region)
 	}
 
 	// Test cache miss
@@ -67,7 +70,7 @@ func TestCityCache(t *testing.T) {
 
 	// Test TTL expiration
 	expireCache := newCityCache(100, 100*time.Millisecond)
-	expireCache.Set("1.1.1.1", true)
+	expireCache.Set("1.1.1.1", cityResult{Region: "test", Matched: true})
 	time.Sleep(200 * time.Millisecond)
 	_, found = expireCache.Get("1.1.1.1")
 	if found {

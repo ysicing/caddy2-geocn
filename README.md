@@ -23,7 +23,6 @@ xcaddy build --with github.com/ysicing/caddy2-geocn
 
 ### GeoCity 模块
 - 🏙️ 支持省份和城市级别的访问控制
-- ✅ 白名单和黑名单模式
 - 🧠 IP 获取：优先使用 Caddy 的 `ClientIPVarKey`（需配置 `trusted_proxies`），回退到 `RemoteAddr`
 - 🔄 自动更新 ip2region 数据库（默认每 24h 检查）
 - 🗄️ 查询结果缓存（默认启用：TTL 5m，容量 10000；可在 Caddyfile 用 `cache off` 关闭）
@@ -123,11 +122,10 @@ site2.example.com {
     }
 }
 
-# 只允许北京和上海访问（推荐使用 regions）
+# 只允许北京和上海访问
 city.example.com {
     @allowed {
         geocity {
-            mode allow
             regions "北京" "上海"
             # 在整个 region 字符串中搜索
             # 例如 "中国|0|北京|北京市|联通" 会匹配 "北京"
@@ -143,11 +141,10 @@ city.example.com {
     }
 }
 
-# 拒绝特定省份访问
+# 禁止特定省份访问（使用 not 匹配器）
 province.example.com {
     @blocked {
         geocity {
-            mode deny
             regions "河北" "山东"
         }
     }
@@ -165,15 +162,13 @@ province.example.com {
 ## GeoCity 说明
 
 - 双栈：支持 IPv4 与 IPv6，自动按 IP 版本选择对应数据库
-- 模式：白名单 allow、黑名单 deny
 - 数据源：支持 HTTP URL 或本地文件（分别配置 v4/v6 源）
 - 更新：默认每 24h 检查 HTTP 源是否更新，缺少 Last-Modified 时按 `interval` 回退判断
 - 缓存：默认启用（TTL 5m，容量 10000），可 `cache off` 关闭
 - IP 获取：优先使用 Caddy 的 `ClientIPVarKey`（需配置 `trusted_proxies`），回退到 `RemoteAddr`
 
 配置项：
-- `mode`：`allow`（默认）或 `deny`
-- `regions`：地区关键词列表（推荐），在整个 region 字符串中搜索匹配
+- `regions`：地区关键词列表，在整个 region 字符串中搜索匹配
 - `provinces`：省份列表（已废弃，建议使用 regions）
 - `cities`：城市列表（已废弃，建议使用 regions）
 - `ipv4_source`：IPv4 数据库源（HTTP URL 或本地文件）
@@ -203,21 +198,10 @@ geocity {
 
 常见用法：
 
-- 白名单（仅允许部分省市）：
+- 允许部分省市访问：
 ```caddyfile
 geocity {
-    mode allow
-    provinces "广东" "浙江"
-    cities "北京" "上海"
-}
-```
-
-- 黑名单（拒绝部分省市）：
-```caddyfile
-geocity {
-    mode deny
-    provinces "河北"
-    cities "石家庄"
+    regions "广东" "浙江" "北京" "上海"
 }
 ```
 
@@ -232,9 +216,54 @@ geocity {
 
 行为说明：
 - 私有/环回/链路本地/未指定/组播地址会被跳过
-- 非中国 IP：allow 模式下默认不匹配；deny 模式下默认匹配
+- 非中国 IP 返回 false（不匹配）
 - 本地文件作为数据源时不参与定期更新；HTTP 源才会根据 `interval` 检查更新
 - 首次运行会自动下载数据库到 `{caddy_data_dir}/geocity/ipv4.xdb` 与 `{caddy_data_dir}/geocity/ipv6.xdb`
+
+## 变量（用于响应 Header）
+
+匹配器会设置以下变量，可在 Caddyfile 中使用 `header` 指令将其添加到响应 Header：
+
+### GeoCN 变量
+- `{http.vars.geocn_ip}` - 客户端 IP
+- `{http.vars.geocn_country}` - 国家代码（如 "CN"）
+
+### GeoCity 变量
+- `{http.vars.geocity_ip}` - 客户端 IP
+- `{http.vars.geocity_region}` - 完整地区信息（如 "中国|0|北京|北京市|联通"）
+
+### 使用示例
+
+```caddyfile
+example.com {
+    @china geocn
+
+    handle @china {
+        # 将地理位置信息添加到响应 Header
+        header X-Geo-IP "{http.vars.geocn_ip}"
+        header X-Geo-Country "{http.vars.geocn_country}"
+
+        file_server
+    }
+}
+```
+
+```caddyfile
+example.com {
+    @beijing {
+        geocity {
+            regions "北京"
+        }
+    }
+
+    handle @beijing {
+        header X-Geo-IP "{http.vars.geocity_ip}"
+        header X-Geo-Region "{http.vars.geocity_region}"
+
+        reverse_proxy backend:8080
+    }
+}
+```
 
 ## 反向代理配置
 

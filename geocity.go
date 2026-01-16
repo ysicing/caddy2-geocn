@@ -43,7 +43,6 @@ type GeoCity struct {
 	Regions      []string       `json:"regions,omitempty"`
 	Provinces    []string       `json:"provinces,omitempty"` // Deprecated: use Regions instead
 	Cities       []string       `json:"cities,omitempty"`    // Deprecated: use Regions instead
-	Mode         string         `json:"mode,omitempty"`
 	EnableCache  *bool          `json:"enable_cache,omitempty"`
 	CacheTTL     caddy.Duration `json:"cache_ttl,omitempty"`
 	CacheMaxSize int            `json:"cache_max_size,omitempty"`
@@ -62,12 +61,18 @@ type GeoCity struct {
 	sfGroup       *singleflight.Group
 }
 
+// cityResult holds the cached result for a city lookup.
+type cityResult struct {
+	Region  string
+	Matched bool
+}
+
 // cityCache is a TTL cache for city match results.
-type cityCache = Cache[bool]
+type cityCache = Cache[cityResult]
 
 // newCityCache creates a new city cache.
 func newCityCache(maxSize int, ttl time.Duration) *cityCache {
-	return NewCache[bool](maxSize, ttl)
+	return NewCache[cityResult](maxSize, ttl)
 }
 
 func (GeoCity) CaddyModule() caddy.ModuleInfo {
@@ -85,9 +90,6 @@ func (g *GeoCity) Provision(ctx caddy.Context) error {
 	g.updateOnce = new(sync.Once)
 	g.sfGroup = new(singleflight.Group)
 
-	if g.Mode == "" {
-		g.Mode = "allow"
-	}
 	if g.Timeout == 0 {
 		g.Timeout = caddy.Duration(30 * time.Second)
 	}
@@ -353,15 +355,6 @@ func (g *GeoCity) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				g.IPv6Source = d.Val()
-			case "mode":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				mode := d.Val()
-				if mode != "allow" && mode != "deny" {
-					return d.Errf("mode must be 'allow' or 'deny', got '%s'", mode)
-				}
-				g.Mode = mode
 			case "regions":
 				args := d.RemainingArgs()
 				if len(args) == 0 {
@@ -418,93 +411,6 @@ func (g *GeoCity) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	return nil
 }
 
-func (g *GeoCity) matchLocation(ip net.IP) bool {
-	if ip == nil || checkPrivateIP(ip) {
-		return false
-	}
-
-	ipStr := ip.String()
-
-	// Check cache first
-	if g.cache != nil {
-		if matched, found := g.cache.Get(ipStr); found {
-			return matched
-		}
-	}
-
-	// Use singleflight to deduplicate concurrent requests for the same IP
-	result, _, _ := g.sfGroup.Do(ipStr, func() (any, error) {
-		// Double-check cache after acquiring singleflight
-		if g.cache != nil {
-			if matched, found := g.cache.Get(ipStr); found {
-				return matched, nil
-			}
-		}
-
-		g.lock.RLock()
-		defer g.lock.RUnlock()
-
-		var searcher *xdb.Searcher
-		if ip.To4() != nil {
-			searcher = g.searcherIPv4
-			if searcher == nil {
-				g.logger.Debug("IPv4 database not available", zap.String("ip", ipStr))
-				return false, nil
-			}
-		} else {
-			searcher = g.searcherIPv6
-			if searcher == nil {
-				g.logger.Debug("IPv6 database not available", zap.String("ip", ipStr))
-				return false, nil
-			}
-		}
-
-		region, err := searcher.SearchByStr(ipStr)
-		if err != nil {
-			g.logger.Debug("failed to search IP location", zap.String("ip", ipStr), zap.Error(err))
-			return false, nil
-		}
-
-		// ip2region format: Country|Region|Province|City|ISP
-		parts := strings.Split(region, "|")
-		country := strings.TrimSpace(parts[0])
-		if len(parts) >= 4 {
-			province := strings.TrimSpace(parts[2])
-			city := strings.TrimSpace(parts[3])
-			g.logger.Debug("IP location query",
-				zap.String("ip", ipStr),
-				zap.String("country", country),
-				zap.String("province", province),
-				zap.String("city", city),
-				zap.String("region", region))
-
-		} else if len(parts) < 4 {
-			g.logger.Debug("invalid region format", zap.String("region", region))
-		}
-
-		var matched bool
-		if country != "中国" {
-			matched = g.Mode == "deny"
-		} else {
-			switch g.Mode {
-			case "allow":
-				matched = g.matchRegion(region)
-			case "deny":
-				matched = !g.matchRegion(region)
-			}
-		}
-
-		if g.cache != nil {
-			g.cache.Set(ipStr, matched)
-		}
-
-		return matched, nil
-	})
-
-	matched, _ := result.(bool)
-	return matched
-}
-
 // matchRegion checks if the region string contains any of the configured keywords.
 // It searches in the full region string (e.g., "中国|0|北京|北京市|联通").
 func (g *GeoCity) matchRegion(region string) bool {
@@ -532,26 +438,109 @@ func (g *GeoCity) MatchWithError(r *http.Request) (bool, error) {
 }
 
 func (g *GeoCity) Match(r *http.Request) bool {
+	var ip net.IP
+	var ipStr string
+
 	// Use Caddy's ClientIPVarKey which respects trusted_proxies configuration
 	if clientIP, ok := caddyhttp.GetVar(r.Context(), caddyhttp.ClientIPVarKey).(string); ok && clientIP != "" {
-		if ip := getIP(clientIP); ip != nil {
-			matched := g.matchLocation(ip)
-			g.logger.Debug("geocity match result",
-				zap.String("client_ip", clientIP),
-				zap.Bool("matched", matched))
-			return matched
-		}
-	}
-	g.logger.Debug("ClientIPVarKey not set, using RemoteAddr")
-	// Fallback to RemoteAddr if ClientIPVarKey is not set
-	if remoteIP := getIP(r.RemoteAddr); remoteIP != nil {
-		matched := g.matchLocation(remoteIP)
-		g.logger.Debug("geocity match result (fallback)",
-			zap.String("remote_addr", r.RemoteAddr),
-			zap.String("ip", remoteIP.String()),
-			zap.Bool("matched", matched))
-		return matched
+		ip = getIP(clientIP)
+		ipStr = clientIP
 	}
 
-	return false
+	// Fallback to RemoteAddr if ClientIPVarKey is not set
+	if ip == nil {
+		g.logger.Debug("ClientIPVarKey not set, using RemoteAddr")
+		ip = getIP(r.RemoteAddr)
+		ipStr = r.RemoteAddr
+	}
+
+	if ip == nil {
+		return false
+	}
+
+	// Lookup region and get match result
+	region, matched := g.lookupAndMatch(ip)
+
+	// Set variables for use in Caddyfile (e.g., header directive)
+	// Always set these variables so they can be used with {http.vars.geocity_ip}
+	caddyhttp.SetVar(r.Context(), "geocity_ip", ip.String())
+	caddyhttp.SetVar(r.Context(), "geocity_region", region)
+
+	g.logger.Debug("geocity match result",
+		zap.String("client_ip", ipStr),
+		zap.String("region", region),
+		zap.Bool("matched", matched))
+
+	return matched
+}
+
+// lookupAndMatch returns the region string and match result for an IP
+func (g *GeoCity) lookupAndMatch(ip net.IP) (string, bool) {
+	if ip == nil || checkPrivateIP(ip) {
+		return "", false
+	}
+
+	ipStr := ip.String()
+
+	// Check cache first
+	if g.cache != nil {
+		if result, found := g.cache.Get(ipStr); found {
+			return result.Region, result.Matched
+		}
+	}
+
+	// Use singleflight to deduplicate concurrent requests for the same IP
+	result, _, _ := g.sfGroup.Do(ipStr, func() (any, error) {
+		// Double-check cache after acquiring singleflight
+		if g.cache != nil {
+			if cached, found := g.cache.Get(ipStr); found {
+				return cached, nil
+			}
+		}
+
+		g.lock.RLock()
+		defer g.lock.RUnlock()
+
+		var searcher *xdb.Searcher
+		if ip.To4() != nil {
+			searcher = g.searcherIPv4
+			if searcher == nil {
+				return cityResult{}, nil
+			}
+		} else {
+			searcher = g.searcherIPv6
+			if searcher == nil {
+				return cityResult{}, nil
+			}
+		}
+
+		region, err := searcher.SearchByStr(ipStr)
+		if err != nil {
+			g.logger.Debug("failed to search IP location", zap.String("ip", ipStr), zap.Error(err))
+			return cityResult{}, nil
+		}
+
+		// ip2region format: Country|Region|Province|City|ISP
+		parts := strings.Split(region, "|")
+		country := strings.TrimSpace(parts[0])
+
+		var matched bool
+		if country != "中国" {
+			matched = false
+		} else {
+			matched = g.matchRegion(region)
+		}
+
+		res := cityResult{Region: region, Matched: matched}
+		if g.cache != nil {
+			g.cache.Set(ipStr, res)
+		}
+
+		return res, nil
+	})
+
+	if res, ok := result.(cityResult); ok {
+		return res.Region, res.Matched
+	}
+	return "", false
 }

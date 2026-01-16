@@ -48,16 +48,16 @@ type GeoCNApp struct {
 	CacheTTL     caddy.Duration `json:"cache_ttl,omitempty"`
 	CacheMaxSize int            `json:"cache_max_size,omitempty"`
 
-	ctx           caddy.Context
-	lock          *sync.RWMutex
-	dbReader      *geoip2.Reader
-	logger        *zap.Logger
-	cache         *ipCache
-	localFile     string
-	httpClient    *http.Client
-	sfGroup       *singleflight.Group
-	cacheOnce     sync.Once
-	updateOnce    sync.Once
+	ctx        caddy.Context
+	lock       *sync.RWMutex
+	dbReader   *geoip2.Reader
+	logger     *zap.Logger
+	cache      *ipCache
+	localFile  string
+	httpClient *http.Client
+	sfGroup    *singleflight.Group
+	cacheOnce  sync.Once
+	updateOnce sync.Once
 }
 
 // GeoCN is a lightweight matcher that references the global GeoCNApp.
@@ -377,30 +377,39 @@ func (m *GeoCN) Match(r *http.Request) bool {
 		return false
 	}
 
+	var ip, host string
+
 	// Use Caddy's ClientIPVarKey which respects trusted_proxies configuration
 	if clientIP, ok := caddyhttp.GetVar(r.Context(), caddyhttp.ClientIPVarKey).(string); ok && clientIP != "" {
-		if host := getHost(clientIP); host != "" {
-			country := m.app.lookupCountry(host)
-			matched := country == "CN"
-			m.logger.Debug("geocn match result",
-				zap.String("client_ip", clientIP),
-				zap.Bool("is_cn", matched))
-			return matched
-		}
-	}
-	m.logger.Debug("ClientIPVarKey not set, using RemoteAddr")
-	// Fallback to RemoteAddr if ClientIPVarKey is not set
-	if host := getHost(r.RemoteAddr); host != "" {
-		country := m.app.lookupCountry(host)
-		matched := country == "CN"
-		m.logger.Debug("geocn match result (fallback)",
-			zap.String("remote_addr", r.RemoteAddr),
-			zap.String("host", host),
-			zap.Bool("is_cn", matched))
-		return matched
+		ip = clientIP
+		host = getHost(clientIP)
 	}
 
-	return false
+	// Fallback to RemoteAddr if ClientIPVarKey is not set
+	if host == "" {
+		m.logger.Debug("ClientIPVarKey not set, using RemoteAddr")
+		ip = r.RemoteAddr
+		host = getHost(r.RemoteAddr)
+	}
+
+	if host == "" {
+		return false
+	}
+
+	country := m.app.lookupCountry(host)
+	matched := country == "CN"
+
+	// Set variables for use in Caddyfile (e.g., header directive)
+	// Always set these variables so they can be used with {http.vars.geocn_ip}
+	caddyhttp.SetVar(r.Context(), "geocn_ip", host)
+	caddyhttp.SetVar(r.Context(), "geocn_country", country)
+
+	m.logger.Debug("geocn match result",
+		zap.String("client_ip", ip),
+		zap.String("country", country),
+		zap.Bool("is_cn", matched))
+
+	return matched
 }
 
 // parseGeoCNAppCaddyfile parses the global geocn option.
