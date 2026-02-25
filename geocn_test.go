@@ -119,13 +119,13 @@ func TestGeoCNAppUpdateGeoFileReplacesReader(t *testing.T) {
 }
 
 func TestGeoCityUpdateDatabaseReplacesSearcher(t *testing.T) {
-	fixture := fixturePath(t, "ip2region.xdb")
+	fixture := fixturePath(t, "ip2region_v4.xdb")
 	if _, err := os.Stat(fixture); err != nil {
 		t.Fatalf("fixture missing: %v", err)
 	}
 
 	tmpDir := t.TempDir()
-	localFile := filepath.Join(tmpDir, "ip2region.xdb")
+	localFile := filepath.Join(tmpDir, "ip2region_v4.xdb")
 	copyTestFile(t, fixture, localFile)
 
 	initialSearcher, err := xdb.NewWithFileOnly(xdb.IPv4, localFile)
@@ -142,7 +142,7 @@ func TestGeoCityUpdateDatabaseReplacesSearcher(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	module := &GeoCity{
+	module := &GeoCityApp{
 		Timeout:       caddy.Duration(time.Second),
 		IPv4Source:    srv.URL,
 		localIPv4File: localFile,

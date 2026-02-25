@@ -25,15 +25,26 @@ func TestIPCache(t *testing.T) {
 		t.Error("expected cache miss for non-existent IP")
 	}
 
-	// Test eviction
+	// Test eviction: adding a 3rd entry to a size-2 cache should evict one entry
 	smallCache := newIPCache(2, 5*time.Minute)
 	smallCache.Set("1.1.1.1", "US")
 	smallCache.Set("2.2.2.2", "CN")
-	smallCache.Set("3.3.3.3", "JP") // should evict oldest entry
+	smallCache.Set("3.3.3.3", "JP") // should evict one existing entry
 
-	_, found = smallCache.Get("1.1.1.1")
-	if found {
-		t.Error("expected oldest entry to be evicted")
+	// Verify the new entry exists
+	_, found = smallCache.Get("3.3.3.3")
+	if !found {
+		t.Error("expected new entry to exist after eviction")
+	}
+
+	// Verify exactly one of the old entries was evicted
+	_, found1 := smallCache.Get("1.1.1.1")
+	_, found2 := smallCache.Get("2.2.2.2")
+	if found1 && found2 {
+		t.Error("expected one entry to be evicted, but both still exist")
+	}
+	if !found1 && !found2 {
+		t.Error("expected only one entry to be evicted, but both were removed")
 	}
 
 	// Test TTL expiration
@@ -50,16 +61,13 @@ func TestCityCache(t *testing.T) {
 	cache := newCityCache(100, 5*time.Minute)
 
 	// Test set and get
-	cache.Set("1.1.1.1", cityResult{Region: "中国|0|北京|北京市|联通", Matched: true})
-	result, found := cache.Get("1.1.1.1")
+	cache.Set("1.1.1.1", "中国|0|北京|北京市|联通")
+	region, found := cache.Get("1.1.1.1")
 	if !found {
 		t.Error("expected to find cached entry")
 	}
-	if !result.Matched {
-		t.Error("expected matched to be true")
-	}
-	if result.Region != "中国|0|北京|北京市|联通" {
-		t.Errorf("expected region '中国|0|北京|北京市|联通', got '%s'", result.Region)
+	if region != "中国|0|北京|北京市|联通" {
+		t.Errorf("expected region '中国|0|北京|北京市|联通', got '%s'", region)
 	}
 
 	// Test cache miss
@@ -70,7 +78,7 @@ func TestCityCache(t *testing.T) {
 
 	// Test TTL expiration
 	expireCache := newCityCache(100, 100*time.Millisecond)
-	expireCache.Set("1.1.1.1", cityResult{Region: "test", Matched: true})
+	expireCache.Set("1.1.1.1", "test")
 	time.Sleep(200 * time.Millisecond)
 	_, found = expireCache.Get("1.1.1.1")
 	if found {

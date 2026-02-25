@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,13 +14,9 @@ import (
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 )
-
-// checkPrivateIP returns true if the IP is private, loopback, multicast, or unspecified.
-func checkPrivateIP(ip net.IP) bool {
-	return ip.IsLoopback() || ip.IsLinkLocalMulticast() || ip.IsLinkLocalUnicast() ||
-		ip.IsPrivate() || ip.IsUnspecified() || ip.IsMulticast()
-}
 
 // getHost extracts the host part from an address string (may be IP or host:port).
 func getHost(s string) string {
@@ -28,11 +25,6 @@ func getHost(s string) string {
 		host = s
 	}
 	return strings.TrimSpace(host)
-}
-
-// getIP parses an IP from a string that may include a port.
-func getIP(s string) net.IP {
-	return net.ParseIP(getHost(s))
 }
 
 // isHTTPSource returns true if the source is an HTTP/HTTPS URL.
@@ -114,25 +106,38 @@ func downloadFile(ctx context.Context, client *http.Client, remoteURL, localFile
 	}
 	tempFile := out.Name()
 
+	var success bool
+	var closed bool
+	defer func() {
+		if !success {
+			if !closed {
+				out.Close()
+			}
+			os.Remove(tempFile)
+		}
+	}()
+
 	if _, err = io.Copy(out, resp.Body); err != nil {
-		out.Close()
-		os.Remove(tempFile)
 		return fmt.Errorf("writing file: %w", err)
 	}
 
 	if err = out.Sync(); err != nil {
-		out.Close()
-		os.Remove(tempFile)
 		return fmt.Errorf("syncing file: %w", err)
 	}
-	out.Close()
+
+	// Close before rename to release the file handle
+	if err = out.Close(); err != nil {
+		closed = true
+		return fmt.Errorf("closing temp file: %w", err)
+	}
+	closed = true
 
 	// Atomically move to target location
 	if err = os.Rename(tempFile, localFile); err != nil {
-		os.Remove(tempFile)
 		return fmt.Errorf("moving file: %w", err)
 	}
 
+	success = true
 	return nil
 }
 
@@ -241,7 +246,7 @@ func (c *Cache[T]) Set(key string, value T) {
 	defer c.mu.Unlock()
 
 	if _, exists := c.entries[key]; !exists && len(c.entries) >= c.maxSize {
-		c.evictOldest()
+		c.evictOne()
 	}
 
 	c.entries[key] = &cacheEntry[T]{
@@ -250,19 +255,13 @@ func (c *Cache[T]) Set(key string, value T) {
 	}
 }
 
-func (c *Cache[T]) evictOldest() {
-	var oldestKey string
-	var oldestTime time.Time
-
-	for key, entry := range c.entries {
-		if oldestTime.IsZero() || entry.timestamp.Before(oldestTime) {
-			oldestTime = entry.timestamp
-			oldestKey = key
-		}
-	}
-
-	if oldestKey != "" {
-		delete(c.entries, oldestKey)
+// evictOne removes one random entry from the cache.
+// For IP geo-lookup caches, precise LRU ordering is unnecessary;
+// random eviction is O(1) and avoids the O(n) full-table scan.
+func (c *Cache[T]) evictOne() {
+	for key := range c.entries {
+		delete(c.entries, key)
+		return
 	}
 }
 
@@ -301,4 +300,61 @@ func (c *Cache[T]) Cleanup(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// checkPrivateAddr returns true if the address is private, loopback, multicast, or unspecified.
+func checkPrivateAddr(addr netip.Addr) bool {
+	return addr.IsLoopback() || addr.IsLinkLocalMulticast() || addr.IsLinkLocalUnicast() ||
+		addr.IsPrivate() || addr.IsUnspecified() || addr.IsMulticast()
+}
+
+// extractClientIP extracts the client IP host and raw string from an HTTP request.
+// It uses Caddy's ClientIPVarKey (which respects trusted_proxies) with RemoteAddr fallback.
+func extractClientIP(r *http.Request) (host, raw string) {
+	if clientIP, ok := caddyhttp.GetVar(r.Context(), caddyhttp.ClientIPVarKey).(string); ok && clientIP != "" {
+		return getHost(clientIP), clientIP
+	}
+	return getHost(r.RemoteAddr), r.RemoteAddr
+}
+
+// parseCacheBlock parses the cache directive in a Caddyfile block.
+// It handles "cache off" and "cache ttl <dur> size <n>" syntax.
+func parseCacheBlock(d *caddyfile.Dispenser, enableCache **bool, cacheTTL *caddy.Duration, cacheMaxSize *int) error {
+	args := d.RemainingArgs()
+	if len(args) > 0 && args[0] == "off" {
+		off := false
+		*enableCache = &off
+		return nil
+	}
+	on := true
+	*enableCache = &on
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "ttl":
+			i++
+			if i >= len(args) {
+				return d.Errf("missing value for cache ttl")
+			}
+			val, err := caddy.ParseDuration(args[i])
+			if err != nil {
+				return err
+			}
+			*cacheTTL = caddy.Duration(val)
+		case "size":
+			i++
+			if i >= len(args) {
+				return d.Errf("missing value for cache size")
+			}
+			var maxSize int
+			if _, err := fmt.Sscanf(args[i], "%d", &maxSize); err != nil {
+				return d.Errf("invalid cache size: %s", args[i])
+			}
+			if maxSize > 0 {
+				*cacheMaxSize = maxSize
+			}
+		default:
+			return d.Errf("unknown cache option: %s", args[i])
+		}
+	}
+	return nil
 }

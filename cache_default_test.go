@@ -61,7 +61,7 @@ func TestIPCacheBehavior(t *testing.T) {
 			t.Error("Expected 1.1.1.1 to be in cache")
 		}
 
-		// Add one more, should evict oldest
+		// Add one more, should evict one entry
 		cache.Set("4.4.4.4", "D")
 
 		// Newest should be present

@@ -2,8 +2,8 @@ package geocn
 
 import (
 	"fmt"
-	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/lionsoul2014/ip2region/binding/golang/xdb"
 	"go.uber.org/zap"
@@ -22,8 +24,13 @@ var (
 	_ caddy.Module                      = (*GeoCity)(nil)
 	_ caddyhttp.RequestMatcherWithError = (*GeoCity)(nil)
 	_ caddy.Provisioner                 = (*GeoCity)(nil)
-	_ caddy.CleanerUpper                = (*GeoCity)(nil)
 	_ caddyfile.Unmarshaler             = (*GeoCity)(nil)
+
+	_ caddy.Module       = (*GeoCityApp)(nil)
+	_ caddy.App          = (*GeoCityApp)(nil)
+	_ caddy.Provisioner  = (*GeoCityApp)(nil)
+	_ caddy.Validator    = (*GeoCityApp)(nil)
+	_ caddy.CleanerUpper = (*GeoCityApp)(nil)
 )
 
 const (
@@ -32,17 +39,17 @@ const (
 )
 
 func init() {
+	caddy.RegisterModule(GeoCityApp{})
 	caddy.RegisterModule(GeoCity{})
+	httpcaddyfile.RegisterGlobalOption("geocity", parseGeoCityAppCaddyfile)
 }
 
-type GeoCity struct {
+// GeoCityApp is the global app module that manages shared ip2region resources.
+type GeoCityApp struct {
 	Interval     caddy.Duration `json:"interval,omitempty"`
 	Timeout      caddy.Duration `json:"timeout,omitempty"`
 	IPv4Source   string         `json:"ipv4_source,omitempty"`
 	IPv6Source   string         `json:"ipv6_source,omitempty"`
-	Regions      []string       `json:"regions,omitempty"`
-	Provinces    []string       `json:"provinces,omitempty"` // Deprecated: use Regions instead
-	Cities       []string       `json:"cities,omitempty"`    // Deprecated: use Regions instead
 	EnableCache  *bool          `json:"enable_cache,omitempty"`
 	CacheTTL     caddy.Duration `json:"cache_ttl,omitempty"`
 	CacheMaxSize int            `json:"cache_max_size,omitempty"`
@@ -56,23 +63,33 @@ type GeoCity struct {
 	logger        *zap.Logger
 	cache         *cityCache
 	httpClient    *http.Client
-	cacheOnce     *sync.Once
-	updateOnce    *sync.Once
 	sfGroup       *singleflight.Group
 }
 
-// cityResult holds the cached result for a city lookup.
-type cityResult struct {
-	Region  string
-	Matched bool
+// GeoCity is a lightweight matcher that references the global GeoCityApp.
+type GeoCity struct {
+	Regions   []string `json:"regions,omitempty"`
+	Provinces []string `json:"provinces,omitempty"` // Deprecated: use Regions instead
+	Cities    []string `json:"cities,omitempty"`    // Deprecated: use Regions instead
+
+	app         *GeoCityApp
+	logger      *zap.Logger
+	allKeywords []string // pre-merged keywords from Regions+Provinces+Cities
 }
 
-// cityCache is a TTL cache for city match results.
-type cityCache = Cache[cityResult]
+// cityCache is a TTL cache for IP region lookups.
+type cityCache = Cache[string]
 
 // newCityCache creates a new city cache.
 func newCityCache(maxSize int, ttl time.Duration) *cityCache {
-	return NewCache[cityResult](maxSize, ttl)
+	return NewCache[string](maxSize, ttl)
+}
+
+func (GeoCityApp) CaddyModule() caddy.ModuleInfo {
+	return caddy.ModuleInfo{
+		ID:  "geocity",
+		New: func() caddy.Module { return new(GeoCityApp) },
+	}
 }
 
 func (GeoCity) CaddyModule() caddy.ModuleInfo {
@@ -82,279 +99,381 @@ func (GeoCity) CaddyModule() caddy.ModuleInfo {
 	}
 }
 
-func (g *GeoCity) Provision(ctx caddy.Context) error {
-	g.ctx = ctx
-	g.lock = new(sync.RWMutex)
-	g.logger = ctx.Logger(g)
-	g.cacheOnce = new(sync.Once)
-	g.updateOnce = new(sync.Once)
-	g.sfGroup = new(singleflight.Group)
+func (app *GeoCityApp) Provision(ctx caddy.Context) error {
+	app.ctx = ctx
+	app.lock = new(sync.RWMutex)
+	app.logger = ctx.Logger()
+	app.sfGroup = new(singleflight.Group)
 
-	if g.Timeout == 0 {
-		g.Timeout = caddy.Duration(30 * time.Second)
+	if app.Timeout == 0 {
+		app.Timeout = caddy.Duration(30 * time.Second)
 	}
-	g.httpClient = newHTTPClient(time.Duration(g.Timeout))
+	app.httpClient = newHTTPClient(time.Duration(app.Timeout))
 
-	caddyDir := caddy.AppDataDir()
-	cacheDir := filepath.Join(caddyDir, "geocity")
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
-		return fmt.Errorf("failed to create cache directory: %v", err)
+	if app.IPv4Source == "" {
+		app.IPv4Source = ip2regionIPv4RemoteFile
 	}
-
-	g.localIPv4File = filepath.Join(cacheDir, "ipv4.xdb")
-	g.localIPv6File = filepath.Join(cacheDir, "ipv6.xdb")
-
-	if g.IPv4Source == "" {
-		g.IPv4Source = ip2regionIPv4RemoteFile
-	}
-	if g.IPv6Source == "" {
-		g.IPv6Source = ip2regionIPv6RemoteFile
+	if app.IPv6Source == "" {
+		app.IPv6Source = ip2regionIPv6RemoteFile
 	}
 
-	if g.EnableCache == nil {
+	if app.Interval == 0 {
+		app.Interval = caddy.Duration(24 * time.Hour)
+	}
+
+	if app.EnableCache == nil {
 		enableCache := true
-		g.EnableCache = &enableCache
+		app.EnableCache = &enableCache
 	}
 
-	if *g.EnableCache {
-		if g.CacheMaxSize <= 0 {
-			g.CacheMaxSize = 10000
+	if *app.EnableCache {
+		if app.CacheMaxSize <= 0 {
+			app.CacheMaxSize = 10000
 		}
-		if g.CacheTTL == 0 {
-			g.CacheTTL = caddy.Duration(5 * time.Minute)
+		if app.CacheTTL == 0 {
+			app.CacheTTL = caddy.Duration(5 * time.Minute)
 		}
-		g.cache = newCityCache(g.CacheMaxSize, time.Duration(g.CacheTTL))
-		g.cacheOnce.Do(func() {
-			go g.cache.Cleanup(g.ctx)
-		})
-		g.logger.Info("City cache enabled",
-			zap.Duration("ttl", time.Duration(g.CacheTTL)),
-			zap.Int("max_size", g.CacheMaxSize))
+		app.logger.Info("City cache enabled",
+			zap.Duration("ttl", time.Duration(app.CacheTTL)),
+			zap.Int("max_size", app.CacheMaxSize))
 	}
 
-	if err := g.loadDatabase(g.IPv4Source, g.localIPv4File, xdb.IPv4, &g.searcherIPv4); err != nil {
-		g.logger.Warn("failed to load IPv4 database",
-			zap.String("source", g.IPv4Source),
-			zap.Error(err))
-	}
-
-	if err := g.loadDatabase(g.IPv6Source, g.localIPv6File, xdb.IPv6, &g.searcherIPv6); err != nil {
-		g.logger.Warn("failed to load IPv6 database",
-			zap.String("source", g.IPv6Source),
-			zap.Error(err))
-	}
-
-	if g.searcherIPv4 == nil && g.searcherIPv6 == nil {
-		return fmt.Errorf("failed to load any IP database (neither IPv4 nor IPv6)")
-	}
-
-	g.updateOnce.Do(func() {
-		go g.periodicUpdate()
-	})
 	return nil
 }
 
-func (g *GeoCity) loadDatabase(source, cacheFile string, version *xdb.Version, searcher **xdb.Searcher) error {
-	if s, err := xdb.NewWithFileOnly(version, cacheFile); err == nil {
-		g.lock.Lock()
+// Validate implements caddy.Validator.
+func (app *GeoCityApp) Validate() error {
+	if app.Interval <= 0 {
+		return fmt.Errorf("geocity: interval must be positive")
+	}
+	if app.IPv4Source != "" && !isHTTPSource(app.IPv4Source) {
+		if _, err := os.Stat(app.IPv4Source); err != nil {
+			return fmt.Errorf("geocity: ipv4_source file not found: %s", app.IPv4Source)
+		}
+	}
+	if app.IPv6Source != "" && !isHTTPSource(app.IPv6Source) {
+		if _, err := os.Stat(app.IPv6Source); err != nil {
+			return fmt.Errorf("geocity: ipv6_source file not found: %s", app.IPv6Source)
+		}
+	}
+	return nil
+}
+
+func (app *GeoCityApp) Start() error {
+	// Create cache directory in Start() to avoid side effects during caddy validate
+	caddyDir := caddy.AppDataDir()
+	cacheDir := filepath.Join(caddyDir, "geocity")
+	if err := os.MkdirAll(cacheDir, 0750); err != nil {
+		return fmt.Errorf("failed to create cache directory: %w", err)
+	}
+	app.localIPv4File = filepath.Join(cacheDir, "ipv4.xdb")
+	app.localIPv6File = filepath.Join(cacheDir, "ipv6.xdb")
+
+	if app.EnableCache != nil && *app.EnableCache {
+		app.cache = newCityCache(app.CacheMaxSize, time.Duration(app.CacheTTL))
+	}
+
+	if err := app.loadDatabase(app.IPv4Source, app.localIPv4File, xdb.IPv4, &app.searcherIPv4); err != nil {
+		app.logger.Warn("failed to load IPv4 database",
+			zap.String("source", app.IPv4Source),
+			zap.Error(err))
+	}
+
+	if err := app.loadDatabase(app.IPv6Source, app.localIPv6File, xdb.IPv6, &app.searcherIPv6); err != nil {
+		app.logger.Warn("failed to load IPv6 database",
+			zap.String("source", app.IPv6Source),
+			zap.Error(err))
+	}
+
+	if app.searcherIPv4 == nil && app.searcherIPv6 == nil {
+		return fmt.Errorf("failed to load any IP database (neither IPv4 nor IPv6)")
+	}
+
+	// Only start background goroutines after all error checks pass
+	if app.cache != nil {
+		go app.cache.Cleanup(app.ctx)
+	}
+	go app.periodicUpdate()
+	return nil
+}
+
+func (app *GeoCityApp) Stop() error {
+	return nil
+}
+
+func (app *GeoCityApp) Cleanup() error {
+	app.lock.Lock()
+	defer app.lock.Unlock()
+
+	if app.searcherIPv4 != nil {
+		app.searcherIPv4.Close()
+		app.searcherIPv4 = nil
+	}
+	if app.searcherIPv6 != nil {
+		app.searcherIPv6.Close()
+		app.searcherIPv6 = nil
+	}
+	return nil
+}
+
+// openXDBFromFile loads an xdb file entirely into memory and returns a Searcher.
+// This avoids holding file handles open, which prevents os.Rename failures on Windows.
+func openXDBFromFile(version *xdb.Version, path string) (*xdb.Searcher, error) {
+	data, err := xdb.LoadContentFromFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return xdb.NewWithBuffer(version, data)
+}
+
+func (app *GeoCityApp) loadDatabase(source, cacheFile string, version *xdb.Version, searcher **xdb.Searcher) error {
+	if s, err := openXDBFromFile(version, cacheFile); err == nil {
+		app.lock.Lock()
 		oldSearcher := *searcher
 		*searcher = s
-		g.lock.Unlock()
+		app.lock.Unlock()
 		if oldSearcher != nil {
 			oldSearcher.Close()
 		}
-		g.logger.Debug("loaded database from cache",
+		app.logger.Debug("loaded database from cache",
 			zap.String("cache", cacheFile),
 			zap.String("source", source))
 		return nil
 	}
 
 	if isHTTPSource(source) {
-		ctx, cancel := getContextWithTimeout(g.ctx, g.Timeout)
+		ctx, cancel := getContextWithTimeout(app.ctx, app.Timeout)
 		defer cancel()
-		if err := downloadFile(ctx, g.httpClient, source, cacheFile); err != nil {
+		if err := downloadFile(ctx, app.httpClient, source, cacheFile); err != nil {
 			return fmt.Errorf("download from %s: %w", source, err)
 		}
 	} else {
 		if _, err := os.Stat(source); err != nil {
-			return fmt.Errorf("local file not found: %s", source)
+			return fmt.Errorf("local file not found: %w", err)
 		}
 		if err := copyFile(source, cacheFile); err != nil {
-			g.logger.Debug("failed to copy database to cache, using source directly",
+			app.logger.Debug("failed to copy database to cache, using source directly",
 				zap.String("source", source),
 				zap.Error(err))
 			// Update struct field when using source directly
 			if version == xdb.IPv4 {
-				g.localIPv4File = source
+				app.localIPv4File = source
 			} else {
-				g.localIPv6File = source
+				app.localIPv6File = source
 			}
 			cacheFile = source
 		}
 	}
 
-	s, err := xdb.NewWithFileOnly(version, cacheFile)
+	s, err := openXDBFromFile(version, cacheFile)
 	if err != nil {
 		return fmt.Errorf("load database: %w", err)
 	}
-	g.lock.Lock()
+	app.lock.Lock()
 	oldSearcher := *searcher
 	*searcher = s
-	g.lock.Unlock()
+	app.lock.Unlock()
 	if oldSearcher != nil {
 		oldSearcher.Close()
 	}
 
-	g.logger.Info("loaded database",
+	app.logger.Info("loaded database",
 		zap.String("source", source),
 		zap.String("cache", cacheFile))
 	return nil
 }
 
-func (g *GeoCity) updateDatabase(source, localFile string, version *xdb.Version, searcher **xdb.Searcher, label string) error {
+func (app *GeoCityApp) updateDatabase(source, localFile string, version *xdb.Version, searcher **xdb.Searcher, label string) error {
 	if !isHTTPSource(source) {
-		return g.loadDatabase(source, localFile, version, searcher)
+		return app.loadDatabase(source, localFile, version, searcher)
 	}
 
 	tempFile := localFile + ".temp"
-	ctx, cancel := getContextWithTimeout(g.ctx, g.Timeout)
+	ctx, cancel := getContextWithTimeout(app.ctx, app.Timeout)
 	defer cancel()
 
-	if err := downloadFile(ctx, g.httpClient, source, tempFile); err != nil {
+	if err := downloadFile(ctx, app.httpClient, source, tempFile); err != nil {
 		if rmErr := os.Remove(tempFile); rmErr != nil {
-			g.logger.Debug("failed to remove temp file", zap.String("file", tempFile), zap.Error(rmErr))
+			app.logger.Debug("failed to remove temp file", zap.String("file", tempFile), zap.Error(rmErr))
 		}
-		return fmt.Errorf("download %s database failed: %v", label, err)
+		return fmt.Errorf("download %s database failed: %w", label, err)
 	}
 
-	tempSearcher, err := xdb.NewWithFileOnly(version, tempFile)
+	// Validate by loading into memory — no file handle held after this
+	tempSearcher, err := openXDBFromFile(version, tempFile)
 	if err != nil {
 		if rmErr := os.Remove(tempFile); rmErr != nil {
-			g.logger.Debug("failed to remove temp file", zap.String("file", tempFile), zap.Error(rmErr))
+			app.logger.Debug("failed to remove temp file", zap.String("file", tempFile), zap.Error(rmErr))
 		}
-		return fmt.Errorf("invalid %s database file: %v", label, err)
+		return fmt.Errorf("invalid %s database file: %w", label, err)
 	}
-	tempSearcher.Close()
 
 	if err := os.Rename(tempFile, localFile); err != nil {
+		tempSearcher.Close()
 		if rmErr := os.Remove(tempFile); rmErr != nil {
-			g.logger.Debug("failed to remove temp file", zap.String("file", tempFile), zap.Error(rmErr))
+			app.logger.Debug("failed to remove temp file", zap.String("file", tempFile), zap.Error(rmErr))
 		}
-		return fmt.Errorf("replace %s database file failed: %v", label, err)
+		return fmt.Errorf("replace %s database file failed: %w", label, err)
 	}
 
-	newSearcher, err := xdb.NewWithFileOnly(version, localFile)
-	if err != nil {
-		return fmt.Errorf("open new %s database file failed: %v", label, err)
-	}
-
-	g.lock.Lock()
+	// Swap the already-loaded searcher directly — no need to re-open from file
+	app.lock.Lock()
 	oldSearcher := *searcher
-	*searcher = newSearcher
-	g.lock.Unlock()
+	*searcher = tempSearcher
+	app.lock.Unlock()
 
 	if oldSearcher != nil {
 		oldSearcher.Close()
 	}
 
-	g.logger.Info(label+" database updated successfully", zap.String("file", localFile))
+	app.logger.Info(label+" database updated successfully", zap.String("file", localFile))
 	return nil
 }
 
-func (g *GeoCity) updateDatabaseIPv4() error {
-	return g.updateDatabase(g.IPv4Source, g.localIPv4File, xdb.IPv4, &g.searcherIPv4, "IPv4")
+func (app *GeoCityApp) updateDatabaseIPv4() error {
+	return app.updateDatabase(app.IPv4Source, app.localIPv4File, xdb.IPv4, &app.searcherIPv4, "IPv4")
 }
 
-func (g *GeoCity) updateDatabaseIPv6() error {
-	return g.updateDatabase(g.IPv6Source, g.localIPv6File, xdb.IPv6, &g.searcherIPv6, "IPv6")
+func (app *GeoCityApp) updateDatabaseIPv6() error {
+	return app.updateDatabase(app.IPv6Source, app.localIPv6File, xdb.IPv6, &app.searcherIPv6, "IPv6")
 }
 
-func (g *GeoCity) periodicUpdate() {
-	if g.Interval == 0 {
-		g.Interval = caddy.Duration(24 * time.Hour)
-	}
-
-	ticker := time.NewTicker(time.Duration(g.Interval))
+func (app *GeoCityApp) periodicUpdate() {
+	ticker := time.NewTicker(time.Duration(app.Interval))
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
-			g.tryUpdateSource(g.IPv4Source, g.localIPv4File, g.updateDatabaseIPv4, "IPv4")
-			g.tryUpdateSource(g.IPv6Source, g.localIPv6File, g.updateDatabaseIPv6, "IPv6")
-		case <-g.ctx.Done():
+			app.tryUpdateSource(app.IPv4Source, app.localIPv4File, app.updateDatabaseIPv4, "IPv4")
+			app.tryUpdateSource(app.IPv6Source, app.localIPv6File, app.updateDatabaseIPv6, "IPv6")
+		case <-app.ctx.Done():
 			return
 		}
 	}
 }
 
-func (g *GeoCity) tryUpdateSource(source, localFile string, updateFn func() error, label string) {
+func (app *GeoCityApp) tryUpdateSource(source, localFile string, updateFn func() error, label string) {
 	if source == "" || !isHTTPSource(source) {
 		return
 	}
 
-	ctx, cancel := getContextWithTimeout(g.ctx, g.Timeout)
+	ctx, cancel := getContextWithTimeout(app.ctx, app.Timeout)
 	defer cancel()
 
-	ok, err := checkRemoteUpdate(ctx, g.httpClient, source, localFile, time.Duration(g.Interval))
+	ok, err := checkRemoteUpdate(ctx, app.httpClient, source, localFile, time.Duration(app.Interval))
 	if err != nil {
-		g.logger.Warn("check "+label+" update failed", zap.Error(err))
+		app.logger.Warn("check "+label+" update failed", zap.Error(err))
 		return
 	}
 	if ok {
 		if err := updateFn(); err != nil {
-			g.logger.Error("update "+label+" database failed", zap.Error(err))
+			app.logger.Error("update "+label+" database failed", zap.Error(err))
 		}
 	}
 }
 
-func (g *GeoCity) Cleanup() error {
-	g.lock.Lock()
-	defer g.lock.Unlock()
+// lookupRegion returns the region string for an IP.
+// It only caches the region string so different matchers with different
+// region filters can share the same cache safely.
+func (app *GeoCityApp) lookupRegion(host string) string {
+	nip, err := netip.ParseAddr(host)
+	if err != nil || !nip.IsValid() || checkPrivateAddr(nip) {
+		return ""
+	}
 
-	if g.searcherIPv4 != nil {
-		g.searcherIPv4.Close()
-		g.searcherIPv4 = nil
+	// Check cache first
+	if app.cache != nil {
+		if region, found := app.cache.Get(host); found {
+			return region
+		}
 	}
-	if g.searcherIPv6 != nil {
-		g.searcherIPv6.Close()
-		g.searcherIPv6 = nil
+
+	// Use singleflight to deduplicate concurrent requests for the same IP
+	result, _, _ := app.sfGroup.Do(host, func() (any, error) {
+		// Double-check cache after acquiring singleflight
+		if app.cache != nil {
+			if region, found := app.cache.Get(host); found {
+				return region, nil
+			}
+		}
+
+		app.lock.RLock()
+		defer app.lock.RUnlock()
+
+		var searcher *xdb.Searcher
+		if nip.Is4() || nip.Is4In6() {
+			searcher = app.searcherIPv4
+			if searcher == nil {
+				return "", nil
+			}
+		} else {
+			searcher = app.searcherIPv6
+			if searcher == nil {
+				return "", nil
+			}
+		}
+
+		region, err := searcher.SearchByStr(host)
+		if err != nil {
+			app.logger.Debug("failed to search IP location", zap.String("ip", host), zap.Error(err))
+			return "", nil
+		}
+
+		if app.cache != nil && region != "" {
+			app.cache.Set(host, region)
+		}
+
+		return region, nil
+	})
+
+	region, _ := result.(string)
+	return region
+}
+
+// --- GeoCity matcher ---
+
+func (g *GeoCity) Provision(ctx caddy.Context) error {
+	g.logger = ctx.Logger()
+
+	if len(g.Provinces) > 0 {
+		g.logger.Warn("'provinces' is deprecated, use 'regions' instead")
 	}
+	if len(g.Cities) > 0 {
+		g.logger.Warn("'cities' is deprecated, use 'regions' instead")
+	}
+
+	// Pre-merge all keywords to avoid per-request allocation
+	g.allKeywords = make([]string, 0, len(g.Regions)+len(g.Provinces)+len(g.Cities))
+	g.allKeywords = append(g.allKeywords, g.Regions...)
+	g.allKeywords = append(g.allKeywords, g.Provinces...)
+	g.allKeywords = append(g.allKeywords, g.Cities...)
+
+	appModule, err := ctx.App("geocity")
+	if err != nil {
+		return fmt.Errorf("failed to get geocity app: %w", err)
+	}
+
+	var ok bool
+	g.app, ok = appModule.(*GeoCityApp)
+	if !ok {
+		return fmt.Errorf("geocity app has wrong type")
+	}
+
 	return nil
 }
 
+// UnmarshalCaddyfile implements caddyfile.Unmarshaler. Syntax:
+//
+//	geocity {
+//	    regions       <keyword> [<keyword>...]
+//	    provinces     <keyword> [<keyword>...]
+//	    cities        <keyword> [<keyword>...]
+//	}
 func (g *GeoCity) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	for d.Next() {
 		for n := d.Nesting(); d.NextBlock(n); {
 			switch d.Val() {
-			case "interval":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				val, err := caddy.ParseDuration(d.Val())
-				if err != nil {
-					return err
-				}
-				g.Interval = caddy.Duration(val)
-			case "timeout":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				val, err := caddy.ParseDuration(d.Val())
-				if err != nil {
-					return err
-				}
-				g.Timeout = caddy.Duration(val)
-			case "ipv4_source":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				g.IPv4Source = d.Val()
-			case "ipv6_source":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				g.IPv6Source = d.Val()
 			case "regions":
 				args := d.RemainingArgs()
 				if len(args) == 0 {
@@ -373,36 +492,6 @@ func (g *GeoCity) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				g.Cities = append(g.Cities, args...)
-			case "cache":
-				if d.NextArg() && d.Val() == "off" {
-					enableCache := false
-					g.EnableCache = &enableCache
-					continue
-				}
-				enableCache := true
-				g.EnableCache = &enableCache
-				for d.NextArg() {
-					switch d.Val() {
-					case "ttl":
-						if d.NextArg() {
-							val, err := caddy.ParseDuration(d.Val())
-							if err != nil {
-								return err
-							}
-							g.CacheTTL = caddy.Duration(val)
-						}
-					case "size":
-						if d.NextArg() {
-							var maxSize int
-							if _, err := fmt.Sscanf(d.Val(), "%d", &maxSize); err != nil {
-								return d.Errf("invalid cache size: %s", d.Val())
-							}
-							if maxSize > 0 {
-								g.CacheMaxSize = maxSize
-							}
-						}
-					}
-				}
 			default:
 				return d.ArgErr()
 			}
@@ -414,17 +503,11 @@ func (g *GeoCity) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 // matchRegion checks if the region string contains any of the configured keywords.
 // It searches in the full region string (e.g., "中国|0|北京|北京市|联通").
 func (g *GeoCity) matchRegion(region string) bool {
-	// Merge all keywords: Regions + Provinces + Cities (for backward compatibility)
-	keywords := make([]string, 0, len(g.Regions)+len(g.Provinces)+len(g.Cities))
-	keywords = append(keywords, g.Regions...)
-	keywords = append(keywords, g.Provinces...)
-	keywords = append(keywords, g.Cities...)
-
-	if len(keywords) == 0 {
+	if len(g.allKeywords) == 0 {
 		return true // No filter configured, match all Chinese IPs
 	}
 
-	for _, kw := range keywords {
+	for _, kw := range g.allKeywords {
 		if strings.Contains(region, kw) {
 			return true
 		}
@@ -438,104 +521,97 @@ func (g *GeoCity) MatchWithError(r *http.Request) (bool, error) {
 }
 
 func (g *GeoCity) Match(r *http.Request) bool {
-	var ip net.IP
-	var ipStr string
-
-	// Use Caddy's ClientIPVarKey which respects trusted_proxies configuration
-	if clientIP, ok := caddyhttp.GetVar(r.Context(), caddyhttp.ClientIPVarKey).(string); ok && clientIP != "" {
-		ip = getIP(clientIP)
-		ipStr = clientIP
-	}
-
-	// Fallback to RemoteAddr if ClientIPVarKey is not set
-	if ip == nil {
-		g.logger.Debug("ClientIPVarKey not set, using RemoteAddr")
-		ip = getIP(r.RemoteAddr)
-		ipStr = r.RemoteAddr
-	}
-
-	if ip == nil {
+	if g.app == nil {
+		g.logger.Error("geocity app not initialized")
 		return false
 	}
 
-	// Lookup region and get match result
-	region, matched := g.lookupAndMatch(ip)
+	host, raw := extractClientIP(r)
+	if host == "" {
+		return false
+	}
+
+	// Lookup region, then match locally per-matcher config
+	region := g.app.lookupRegion(host)
+
+	var matched bool
+	if region == "" {
+		matched = false
+	} else {
+		country, _, _ := strings.Cut(region, "|")
+		country = strings.TrimSpace(country)
+		matched = country == "中国" && g.matchRegion(region)
+	}
 
 	g.logger.Debug("geocity match result",
-		zap.String("client_ip", ipStr),
+		zap.String("client_ip", raw),
 		zap.String("region", region),
 		zap.Bool("matched", matched))
 
 	return matched
 }
 
-// lookupAndMatch returns the region string and match result for an IP
-func (g *GeoCity) lookupAndMatch(ip net.IP) (string, bool) {
-	if ip == nil || checkPrivateIP(ip) {
-		return "", false
-	}
+// parseGeoCityAppCaddyfile parses the global geocity option.
+//
+//	{
+//	    geocity {
+//	        interval 24h
+//	        timeout 30s
+//	        ipv4_source <url_or_path>
+//	        ipv6_source <url_or_path>
+//	        cache ttl 5m size 10000
+//	        # or: cache off
+//	    }
+//	}
+func parseGeoCityAppCaddyfile(d *caddyfile.Dispenser, _ any) (any, error) {
+	app := new(GeoCityApp)
 
-	ipStr := ip.String()
-
-	// Check cache first
-	if g.cache != nil {
-		if result, found := g.cache.Get(ipStr); found {
-			return result.Region, result.Matched
-		}
-	}
-
-	// Use singleflight to deduplicate concurrent requests for the same IP
-	result, _, _ := g.sfGroup.Do(ipStr, func() (any, error) {
-		// Double-check cache after acquiring singleflight
-		if g.cache != nil {
-			if cached, found := g.cache.Get(ipStr); found {
-				return cached, nil
+	for d.Next() {
+		for n := d.Nesting(); d.NextBlock(n); {
+			switch d.Val() {
+			case "interval":
+				if !d.NextArg() {
+					return nil, d.ArgErr()
+				}
+				val, err := caddy.ParseDuration(d.Val())
+				if err != nil {
+					return nil, err
+				}
+				app.Interval = caddy.Duration(val)
+			case "timeout":
+				if !d.NextArg() {
+					return nil, d.ArgErr()
+				}
+				val, err := caddy.ParseDuration(d.Val())
+				if err != nil {
+					return nil, err
+				}
+				app.Timeout = caddy.Duration(val)
+			case "ipv4_source":
+				if !d.NextArg() {
+					return nil, d.ArgErr()
+				}
+				app.IPv4Source = d.Val()
+			case "ipv6_source":
+				if !d.NextArg() {
+					return nil, d.ArgErr()
+				}
+				app.IPv6Source = d.Val()
+			case "cache":
+				if err := parseCacheBlock(d, &app.EnableCache, &app.CacheTTL, &app.CacheMaxSize); err != nil {
+					return nil, err
+				}
+				if app.EnableCache != nil && !*app.EnableCache {
+					continue
+				}
+			default:
+				return nil, d.ArgErr()
 			}
 		}
-
-		g.lock.RLock()
-		defer g.lock.RUnlock()
-
-		var searcher *xdb.Searcher
-		if ip.To4() != nil {
-			searcher = g.searcherIPv4
-			if searcher == nil {
-				return cityResult{}, nil
-			}
-		} else {
-			searcher = g.searcherIPv6
-			if searcher == nil {
-				return cityResult{}, nil
-			}
-		}
-
-		region, err := searcher.SearchByStr(ipStr)
-		if err != nil {
-			g.logger.Debug("failed to search IP location", zap.String("ip", ipStr), zap.Error(err))
-			return cityResult{}, nil
-		}
-
-		// ip2region format: Country|Region|Province|City|ISP
-		parts := strings.Split(region, "|")
-		country := strings.TrimSpace(parts[0])
-
-		var matched bool
-		if country != "中国" {
-			matched = false
-		} else {
-			matched = g.matchRegion(region)
-		}
-
-		res := cityResult{Region: region, Matched: matched}
-		if g.cache != nil {
-			g.cache.Set(ipStr, res)
-		}
-
-		return res, nil
-	})
-
-	if res, ok := result.(cityResult); ok {
-		return res.Region, res.Matched
 	}
-	return "", false
+
+	return httpcaddyfile.App{
+		Name:  "geocity",
+		Value: caddyconfig.JSON(app, nil),
+	}, nil
 }
