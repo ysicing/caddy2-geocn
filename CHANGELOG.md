@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.7.0] - 2026-02-25
+
+### Changed
+- 重构性能优化：O(1) 随机缓存淘汰策略，内存加载数据库避免文件句柄锁
+- 统一 IP 类型为 netip.Addr，移除旧版 getIP/checkPrivateIP 实现
+- 提取共享函数 extractClientIP、checkPrivateAddr、parseCacheBlock 到 common.go，消除代码重复
+- GeoCity.Provision 预合并 allKeywords，消除每次请求的内存分配
+- lookupRegion 改为接受 string 参数，避免 net.IP 堆分配
+- downloadFile 使用 defer+closed flag 清理，统一 %w 错误包装
+- 升级 caddy/v2 从 v2.10.2 到 v2.11.1
+- 升级 nebula 从 v1.9.7 到 v1.10.3
+- 升级 golang.org/x/sync 从 v0.18.0 到 v0.19.0
+
+### Documentation
+- 添加项目配置文件 CLAUDE.md 和 AGENTS.md
+- 新增完整 Caddyfile 示例 (examples/Caddyfile)
+- 更新缓存和 geocity 配置示例
+
 ## [2025-09-17]
 
 ### Added
