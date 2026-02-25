@@ -1,0 +1,168 @@
+# 完整 Caddyfile 示例 - GeoCN + GeoCity 多层地理位置控制
+#
+# 功能：
+#   - 一线城市中国用户 → 高级后端
+#   - 其他中国用户     → 普通后端
+#   - 海外用户         → 国际站点
+#
+# ip2region 返回格式：国家|区域|省份|城市|ISP
+# 例如："中国|0|北京|北京市|联通"
+
+# ========================================
+# 通用片段（snippet）
+# ========================================
+
+# 日志：JSON 格式 + 滚动，传入日志文件路径
+(LOG) {
+	log {
+		output file {args[0]} {
+			roll_size 100mb
+			roll_keep 7
+			roll_keep_for 7d
+		}
+		format json
+	}
+}
+
+# 压缩
+(COMPRESS) {
+	encode zstd gzip
+}
+
+# 安全响应头
+(SECURITY_HEADERS) {
+	header {
+		X-Content-Type-Options    "nosniff"
+		X-Frame-Options           "DENY"
+		Referrer-Policy           "strict-origin-when-cross-origin"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		-Server
+		-X-Powered-By
+	}
+}
+
+# ========================================
+# 全局配置（所有站点共享）
+# ========================================
+{
+	# 【重要】如果 Caddy 在 CDN / Nginx / LB 后面，必须配置 trusted_proxies，
+	# 否则 geocn / geocity 拿到的是代理 IP 而不是用户真实 IP。
+	# 常见场景：
+	#   Cloudflare:  servers { trusted_proxies cloudflare }
+	#   内网反代:    servers { trusted_proxies static 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 }
+	servers {
+		trusted_proxies static private_ranges
+	}
+
+	# GeoCN: 国家级 IP 匹配（MaxMind GeoIP2）
+	geocn {
+		# source https://example.com/Country.mmdb  # 自定义数据源（默认使用 GeoIP2-CN）
+		interval 24h
+		timeout  30s
+		cache ttl 10m size 50000
+	}
+
+	# GeoCity: 城市级 IP 匹配（ip2region）
+	geocity {
+		# ipv4_source /data/ip2region_v4.xdb  # 自定义 IPv4 数据源
+		# ipv6_source /data/ip2region_v6.xdb  # 自定义 IPv6 数据源
+		interval 24h
+		timeout  30s
+		cache ttl 5m size 20000
+	}
+}
+
+# ========================================
+# 站点1: 多层地理位置路由
+# ========================================
+app.example.com {
+	import LOG /var/log/caddy/app.log
+	import COMPRESS
+	import SECURITY_HEADERS
+
+	# 一线城市匹配
+	@tier1 {
+		geocity {
+			regions "北京" "上海" "广州" "深圳"
+		}
+	}
+
+	# 中国 IP 匹配（国家级）
+	@china geocn
+
+	# 一线城市 → 高级后端
+	handle @tier1 {
+		reverse_proxy premium-backend:8080
+	}
+
+	# 其他中国地区 → 普通后端
+	handle @china {
+		reverse_proxy basic-backend:8080
+	}
+
+	# 海外 → 国际站点
+	handle {
+		reverse_proxy intl-backend:8080
+	}
+}
+
+# ========================================
+# 站点2: API 地域限制
+# ========================================
+api.example.com {
+	import LOG /var/log/caddy/api.log
+	import COMPRESS
+	import SECURITY_HEADERS
+
+	# 仅允许中国 IP 访问 /api/*
+	@api_cn {
+		path /api/*
+		geocn
+	}
+
+	handle @api_cn {
+		reverse_proxy api-backend:3000
+	}
+
+	# 公开接口，无地域限制
+	handle /health {
+		respond "ok" 200
+	}
+
+	handle {
+		respond "Access Denied" 403
+	}
+}
+
+# ========================================
+# 站点3: 静态站点按省份分流
+# ========================================
+static.example.com {
+	import LOG /var/log/caddy/static.log
+	import COMPRESS
+	import SECURITY_HEADERS
+
+	@guangdong {
+		geocity {
+			regions "广东"
+		}
+	}
+
+	@jiangzhe {
+		geocity {
+			regions "江苏" "浙江"
+		}
+	}
+
+	handle @guangdong {
+		reverse_proxy cdn-south:8080
+	}
+
+	handle @jiangzhe {
+		reverse_proxy cdn-east:8080
+	}
+
+	handle {
+		reverse_proxy cdn-default:8080
+	}
+}

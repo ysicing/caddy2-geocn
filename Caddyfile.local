@@ -1,3 +1,5 @@
+# 本地开发测试用，配合 task run 使用
+
 (LOG) {
 	log {
 		output file ./caddy.log {
@@ -17,22 +19,47 @@
 
 {
 	debug
+
+	geocn {
+		cache ttl 5m size 10000
+	}
+
+	geocity {
+		cache ttl 5m size 10000
+	}
 }
 
 :2025 {
 	import COMCFG
 	import LOG
 	metrics /metrics
-	@china {
-		geocn
-	}
+
+	# 国家级：中国 vs 非中国
+	@china geocn
 	@notchina {
 		not geocn
 	}
-	file_server @china {
-		root ./docker/example/deny
+
+	# 城市级：一线城市
+	@tier1 {
+		geocity {
+			regions "北京" "上海" "广州" "深圳"
+		}
 	}
-	file_server @notchina {
-		root ./docker/example/allow
+
+	handle @tier1 {
+		respond "一线城市用户" 200
+	}
+
+	handle @china {
+		file_server {
+			root ./docker/example/deny
+		}
+	}
+
+	handle @notchina {
+		file_server {
+			root ./docker/example/allow
+		}
 	}
 }

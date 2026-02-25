@@ -1,4 +1,7 @@
 # Caddy 配置示例 - GeoCN 和 GeoCity 缓存功能配置
+#
+# 注意：以下每个示例都是独立的 Caddyfile，不能合并在一个文件中使用。
+# 每个文件只能有一个全局选项块 { ... }。
 
 # ========================================
 # GeoCN 模块配置示例（国家级地理位置匹配）
@@ -88,21 +91,25 @@
 # ========================================
 # GeoCity 模块配置示例（城市级地理位置匹配）
 # ========================================
+# GeoCity 同样采用全局单例模式，配置在全局选项块中
 
 # 示例5: 双栈支持（IPv4 + IPv6）
+{
+    geocity {
+        # 分别配置 IPv4 和 IPv6 数据源
+        # 不配置则使用默认官方源
+        # ipv4_source https://github.com/lionsoul2014/ip2region/raw/master/data/ip2region_v4.xdb
+        # ipv6_source https://github.com/lionsoul2014/ip2region/raw/master/data/ip2region_v6.xdb
+
+        # 缓存对两个版本都有效
+        cache ttl 10m size 20000
+    }
+}
+
 :8084 {
     @city_dual {
         geocity {
-            # 分别配置 IPv4 和 IPv6 数据源
-            # 不配置则使用默认官方源
-            # ipv4_source https://github.com/lionsoul2014/ip2region/raw/master/data/ip2region_v4.xdb
-            # ipv6_source https://github.com/lionsoul2014/ip2region/raw/master/data/ip2region_v6.xdb
-
-            mode allow
-            provinces "北京" "上海" "广东"
-
-            # 缓存对两个版本都有效
-            cache ttl 10m size 20000
+            regions "北京" "上海" "广东"
         }
     }
 
@@ -112,23 +119,26 @@
 }
 
 # 示例6: 混合数据源 + 缓存优化
+{
+    geocity {
+        # IPv4 使用本地文件（不更新）
+        ipv4_source /data/ip2region_v4.xdb
+        # IPv6 使用远程源（自动更新）
+        ipv6_source https://cdn.example.com/ip2region_v6.xdb
+
+        # 更新配置（仅影响远程源）
+        interval 24h
+        timeout 60s
+
+        # 缓存配置（两个版本共享）
+        cache ttl 15m size 30000
+    }
+}
+
 :8085 {
     @city_mixed {
         geocity {
-            # IPv4 使用本地文件（不更新）
-            ipv4_source /data/ip2region_v4.xdb
-            # IPv6 使用远程源（自动更新）
-            ipv6_source https://cdn.example.com/ip2region_v6.xdb
-
-            mode allow
-            cities "北京" "上海" "深圳" "杭州"
-
-            # 更新配置（仅影响 IPv6）
-            interval 24h
-            timeout 60s
-
-            # 缓存配置（两个版本共享）
-            cache ttl 15m size 30000
+            regions "北京" "上海" "深圳" "杭州"
         }
     }
 
@@ -146,18 +156,19 @@
     geocn {
         cache ttl 30m size 50000  # 30分钟 TTL
     }
+    geocity {
+        cache ttl 5m size 10000   # 5分钟 TTL
+    }
 }
 
 example.com {
     # 第一层：国家级匹配（使用全局 GeoCN）
     @china_cache geocn
 
-    # 第二层：城市级缓存（TTL 较短）
+    # 第二层：城市级匹配（使用全局 GeoCity）
     @city_cache {
         geocity {
-            mode allow
-            provinces "北京" "上海"
-            cache ttl 5m size 10000   # 5分钟 TTL
+            regions "北京" "上海"
         }
     }
 
@@ -236,7 +247,7 @@ example.com {
 #    - 本地文件：直接使用或复制到缓存目录
 #    - 缓存路径：<caddy_data>/geocn/ 或 <caddy_data>/geocity/
 #
-# 6. 全局单例优势（GeoCN）：
+# 6. 全局单例优势（GeoCN 和 GeoCity）：
 #    - 所有站点共享同一数据库和缓存
 #    - 只有一个更新任务，避免重复下载
 #    - 内存效率高，缓存命中率高

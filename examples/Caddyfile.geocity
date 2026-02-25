@@ -1,7 +1,17 @@
 # GeoCity 模块配置示例 - 城市级地理位置控制
+#
+# 架构说明：
+# - GeoCityApp（全局 app）：管理数据库生命周期、缓存、定期更新
+# - GeoCity（matcher）：轻量匹配器，只配置地区过滤关键词
+#
+# 全局配置放在 { geocity { ... } } 中，所有站点共享
+# 匹配器配置放在 @name { geocity { ... } } 中，每个匹配器独立
+
+# 注意：以下每个示例都是独立的 Caddyfile，不能合并在一个文件中使用。
+# 每个文件只能有一个全局选项块 { ... }。
 
 # ========================================
-# 示例1: 最简配置 - 只允许特定地区访问
+# 示例1: 最简配置 - 只允许特定地区访问（使用默认全局配置）
 # ========================================
 example1.com {
     @allowed {
@@ -22,8 +32,23 @@ example1.com {
 }
 
 # ========================================
-# 示例2: 禁止特定地区访问
+# 示例2: 自定义全局配置
 # ========================================
+{
+    geocity {
+        # 数据源配置
+        ipv4_source https://cdn.example.com/ip2region_v4.xdb
+        ipv6_source https://cdn.example.com/ip2region_v6.xdb
+
+        # 更新策略
+        interval 24h
+        timeout 30s
+
+        # 缓存配置
+        cache ttl 10m size 20000
+    }
+}
+
 example2.com {
     @blocked {
         geocity {
@@ -43,11 +68,16 @@ example2.com {
 # ========================================
 # 示例3: 使用本地数据库文件
 # ========================================
+{
+    geocity {
+        ipv4_source /data/ip2region_v4.xdb
+        ipv6_source /data/ip2region_v6.xdb
+    }
+}
+
 example3.com {
     @local_db {
         geocity {
-            ipv4_source /data/ip2region_v4.xdb
-            ipv6_source /data/ip2region_v6.xdb
             regions "广东" "浙江" "北京" "上海"
         }
     }
@@ -62,55 +92,18 @@ example3.com {
 }
 
 # ========================================
-# 示例4: 混合数据源（本地+远程）
+# 示例4: 禁用缓存
 # ========================================
+{
+    geocity {
+        cache off
+    }
+}
+
 example4.com {
-    @mixed_source {
-        geocity {
-            ipv4_source /opt/geodata/ip2region_v4.xdb
-            ipv6_source https://github.com/lionsoul2014/ip2region/raw/master/data/ip2region_v6.xdb
-            regions "北京" "上海" "广东"
-            interval 24h
-        }
-    }
-
-    handle @mixed_source {
-        reverse_proxy backend:8080
-    }
-
-    handle {
-        respond "访问受限" 403
-    }
-}
-
-# ========================================
-# 示例5: 启用缓存优化
-# ========================================
-example5.com {
-    @cached {
-        geocity {
-            regions "江苏" "浙江" "上海"
-            cache ttl 10m size 20000
-        }
-    }
-
-    handle @cached {
-        file_server
-    }
-
-    handle {
-        respond "地区限制" 403
-    }
-}
-
-# ========================================
-# 示例6: 禁用缓存
-# ========================================
-example6.com {
     @no_cache {
         geocity {
             regions "深圳" "杭州"
-            cache off
         }
     }
 
@@ -120,44 +113,18 @@ example6.com {
 }
 
 # ========================================
-# 示例7: 与其他匹配器组合使用
-# ========================================
-example7.com {
-    @api_geo {
-        path /api/*
-        geocity {
-            regions "北京" "上海" "广东"
-        }
-    }
-
-    @static {
-        path /static/*
-        file
-    }
-
-    handle @api_geo {
-        reverse_proxy api-server:3000
-    }
-
-    handle @static {
-        file_server
-    }
-
-    handle {
-        respond "API 仅限指定地区访问" 403
-    }
-}
-
-# ========================================
-# 示例8: 多层地理位置控制（GeoCN + GeoCity）
+# 示例5: 多层地理位置控制（GeoCN + GeoCity）
 # ========================================
 {
     geocn {
         cache ttl 10m size 20000
     }
+    geocity {
+        cache ttl 5m size 10000
+    }
 }
 
-example8.com {
+example5.com {
     # 第一层：检查是否为中国IP
     @china geocn
 
@@ -182,62 +149,19 @@ example8.com {
 }
 
 # ========================================
-# 示例9: 完整配置示例
-# ========================================
-production.example.com {
-    @allowed {
-        geocity {
-            # 数据源配置（可选）
-            # ipv4_source https://cdn.example.com/ip2region_v4.xdb
-            # ipv6_source https://cdn.example.com/ip2region_v6.xdb
-
-            # 地理位置过滤（在整个 region 字符串中搜索）
-            # ip2region 格式: "国家|区域|省份|城市|ISP"
-            # 例如: "中国|0|北京|北京市|联通"
-            regions "北京" "上海" "广东" "江苏" "浙江" "深圳" "杭州"
-
-            # 更新策略
-            interval 24h
-            timeout 30s
-
-            # 缓存配置
-            cache ttl 5m size 10000
-        }
-    }
-
-    handle @allowed {
-        reverse_proxy {
-            to backend1:8080 backend2:8080
-            lb_policy round_robin
-        }
-    }
-
-    handle {
-        respond "您所在的地区暂不提供服务" 403
-    }
-}
-
-# ========================================
 # 配置说明
 # ========================================
-# 1. regions 字段：
-#    - 在整个 region 字符串中搜索关键词
-#    - ip2region 格式: "国家|区域|省份|城市|ISP"
-#    - 例如配置 regions "北京"，会匹配 "中国|0|北京|北京市|联通"
+# 1. 全局配置（geocity app）：
+#    - ipv4_source / ipv6_source: 数据源（HTTP URL 或本地文件）
+#    - interval: 更新检查间隔（默认 24h）
+#    - timeout: 请求超时（默认 30s）
+#    - cache: 缓存配置（默认 ttl 5m size 10000）
 #
-# 2. 向后兼容：
-#    - provinces 和 cities 字段仍然支持
-#    - 会与 regions 合并进行匹配
+# 2. 匹配器配置（geocity matcher）：
+#    - regions: 地区关键词（在整个 region 字符串中搜索）
+#    - provinces / cities: 向后兼容，会与 regions 合并匹配
 #
 # 3. 匹配逻辑：
-#    - 匹配到 regions 中的关键词 → 返回 true
 #    - 非中国 IP → 返回 false
-#
-# 4. 数据源：
-#    - HTTP URL: 自动下载并定期更新
-#    - 本地文件: 直接使用，不会更新
-#
-# 5. 缓存：
-#    - 默认启用（TTL 5m，容量 10000）
-#    - cache off 禁用
-
+#    - 匹配到 regions 中的关键词 → 返回 true
+#    - 未配置任何关键词 → 匹配所有中国 IP
