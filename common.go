@@ -47,38 +47,20 @@ func copyFile(src, dst string) error {
 	defer destFile.Close()
 
 	if _, err = io.Copy(destFile, sourceFile); err != nil {
+		os.Remove(dst)
 		return err
 	}
-	return destFile.Sync()
-}
-
-// downloadLocks prevents concurrent downloads of the same file.
-var (
-	downloadLocks   = make(map[string]*sync.Mutex)
-	downloadLocksMu sync.Mutex
-)
-
-// getDownloadLock returns a mutex for the given file path.
-func getDownloadLock(path string) *sync.Mutex {
-	downloadLocksMu.Lock()
-	defer downloadLocksMu.Unlock()
-	if downloadLocks[path] == nil {
-		downloadLocks[path] = &sync.Mutex{}
+	if err = destFile.Sync(); err != nil {
+		os.Remove(dst)
+		return err
 	}
-	return downloadLocks[path]
+	return nil
 }
 
 // downloadFile downloads a file from remoteURL to localFile using the provided HTTP client.
 // It downloads to a unique temporary file first, then atomically moves it to the target location.
-// Concurrent calls with the same localFile will be serialized, and if the file already exists
-// after acquiring the lock, the download is skipped.
 func downloadFile(ctx context.Context, client *http.Client, remoteURL, localFile string) error {
-	// Serialize downloads for the same file
-	lock := getDownloadLock(localFile)
-	lock.Lock()
-	defer lock.Unlock()
-
-	// Check if file already exists (another goroutine may have downloaded it)
+	// Check if file already exists
 	if _, err := os.Stat(localFile); err == nil {
 		return nil
 	}
@@ -288,6 +270,7 @@ func (c *Cache[T]) Cleanup(ctx context.Context) {
 			// Phase 2: Delete expired entries with write lock
 			if len(keysToDelete) > 0 {
 				c.mu.Lock()
+				now = time.Now()
 				for _, key := range keysToDelete {
 					// Re-check to avoid deleting entries updated between phases
 					if entry, exists := c.entries[key]; exists && now.Sub(entry.timestamp) > c.ttl {

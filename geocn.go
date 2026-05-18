@@ -16,7 +16,6 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/oschwald/geoip2-golang/v2"
 	"go.uber.org/zap"
-	"golang.org/x/sync/singleflight"
 )
 
 var (
@@ -56,7 +55,6 @@ type GeoCNApp struct {
 	cache      *ipCache
 	localFile  string
 	httpClient *http.Client
-	sfGroup    *singleflight.Group
 }
 
 // GeoCN is a lightweight matcher that references the global GeoCNApp.
@@ -120,7 +118,6 @@ func (app *GeoCNApp) Provision(ctx caddy.Context) error {
 	app.ctx = ctx
 	app.lock = new(sync.RWMutex)
 	app.logger = ctx.Logger()
-	app.sfGroup = new(singleflight.Group)
 
 	if app.Source == "" {
 		app.Source = remotefile
@@ -233,6 +230,9 @@ func (app *GeoCNApp) updateGeoFile() error {
 	}
 
 	tempFile := app.localFile + ".temp"
+	// Remove stale temp file from a previous failed update to avoid downloadFile skipping
+	os.Remove(tempFile)
+
 	ctx, cancel := getContextWithTimeout(app.ctx, app.Timeout)
 	defer cancel()
 
@@ -325,43 +325,29 @@ func (app *GeoCNApp) lookupCountry(host string) string {
 		return ""
 	}
 
-	// Check cache first
 	if app.cache != nil {
 		if country, found := app.cache.Get(host); found {
 			return country
 		}
 	}
 
-	// Use singleflight to deduplicate concurrent requests for the same IP
-	result, _, _ := app.sfGroup.Do(host, func() (any, error) {
-		// Double-check cache after acquiring singleflight
-		if app.cache != nil {
-			if country, found := app.cache.Get(host); found {
-				return country, nil
-			}
-		}
+	app.lock.RLock()
+	defer app.lock.RUnlock()
 
-		app.lock.RLock()
-		defer app.lock.RUnlock()
+	if app.dbReader == nil {
+		return ""
+	}
 
-		if app.dbReader == nil {
-			return "", nil
-		}
+	record, err := app.dbReader.Country(nip)
+	if err != nil || record == nil || !record.HasData() {
+		return ""
+	}
 
-		record, err := app.dbReader.Country(nip)
-		if err != nil || record == nil || !record.HasData() {
-			return "", nil
-		}
+	country := record.Country.ISOCode
+	if app.cache != nil && country != "" {
+		app.cache.Set(host, country)
+	}
 
-		country := record.Country.ISOCode
-		if app.cache != nil && country != "" {
-			app.cache.Set(host, country)
-		}
-
-		return country, nil
-	})
-
-	country, _ := result.(string)
 	return country
 }
 

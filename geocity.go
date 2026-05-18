@@ -17,13 +17,13 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/lionsoul2014/ip2region/binding/golang/xdb"
 	"go.uber.org/zap"
-	"golang.org/x/sync/singleflight"
 )
 
 var (
 	_ caddy.Module                      = (*GeoCity)(nil)
 	_ caddyhttp.RequestMatcherWithError = (*GeoCity)(nil)
 	_ caddy.Provisioner                 = (*GeoCity)(nil)
+	_ caddy.Validator                   = (*GeoCity)(nil)
 	_ caddyfile.Unmarshaler             = (*GeoCity)(nil)
 
 	_ caddy.Module       = (*GeoCityApp)(nil)
@@ -63,7 +63,6 @@ type GeoCityApp struct {
 	logger        *zap.Logger
 	cache         *cityCache
 	httpClient    *http.Client
-	sfGroup       *singleflight.Group
 }
 
 // GeoCity is a lightweight matcher that references the global GeoCityApp.
@@ -103,7 +102,6 @@ func (app *GeoCityApp) Provision(ctx caddy.Context) error {
 	app.ctx = ctx
 	app.lock = new(sync.RWMutex)
 	app.logger = ctx.Logger()
-	app.sfGroup = new(singleflight.Group)
 
 	if app.Timeout == 0 {
 		app.Timeout = caddy.Duration(30 * time.Second)
@@ -289,6 +287,9 @@ func (app *GeoCityApp) updateDatabase(source, localFile string, version *xdb.Ver
 	}
 
 	tempFile := localFile + ".temp"
+	// Remove stale temp file from a previous failed update to avoid downloadFile skipping
+	os.Remove(tempFile)
+
 	ctx, cancel := getContextWithTimeout(app.ctx, app.Timeout)
 	defer cancel()
 
@@ -373,61 +374,44 @@ func (app *GeoCityApp) tryUpdateSource(source, localFile string, updateFn func()
 	}
 }
 
-// lookupRegion returns the region string for an IP.
-// It only caches the region string so different matchers with different
-// region filters can share the same cache safely.
 func (app *GeoCityApp) lookupRegion(host string) string {
 	nip, err := netip.ParseAddr(host)
 	if err != nil || !nip.IsValid() || checkPrivateAddr(nip) {
 		return ""
 	}
 
-	// Check cache first
 	if app.cache != nil {
 		if region, found := app.cache.Get(host); found {
 			return region
 		}
 	}
 
-	// Use singleflight to deduplicate concurrent requests for the same IP
-	result, _, _ := app.sfGroup.Do(host, func() (any, error) {
-		// Double-check cache after acquiring singleflight
-		if app.cache != nil {
-			if region, found := app.cache.Get(host); found {
-				return region, nil
-			}
+	app.lock.RLock()
+	defer app.lock.RUnlock()
+
+	var searcher *xdb.Searcher
+	if nip.Is4() || nip.Is4In6() {
+		searcher = app.searcherIPv4
+		if searcher == nil {
+			return ""
 		}
-
-		app.lock.RLock()
-		defer app.lock.RUnlock()
-
-		var searcher *xdb.Searcher
-		if nip.Is4() || nip.Is4In6() {
-			searcher = app.searcherIPv4
-			if searcher == nil {
-				return "", nil
-			}
-		} else {
-			searcher = app.searcherIPv6
-			if searcher == nil {
-				return "", nil
-			}
+	} else {
+		searcher = app.searcherIPv6
+		if searcher == nil {
+			return ""
 		}
+	}
 
-		region, err := searcher.SearchByStr(host)
-		if err != nil {
-			app.logger.Debug("failed to search IP location", zap.String("ip", host), zap.Error(err))
-			return "", nil
-		}
+	region, err := searcher.SearchByStr(host)
+	if err != nil {
+		app.logger.Debug("failed to search IP location", zap.String("ip", host), zap.Error(err))
+		return ""
+	}
 
-		if app.cache != nil && region != "" {
-			app.cache.Set(host, region)
-		}
+	if app.cache != nil && region != "" {
+		app.cache.Set(host, region)
+	}
 
-		return region, nil
-	})
-
-	region, _ := result.(string)
 	return region
 }
 
@@ -460,6 +444,14 @@ func (g *GeoCity) Provision(ctx caddy.Context) error {
 		return fmt.Errorf("geocity app has wrong type")
 	}
 
+	return nil
+}
+
+// Validate implements caddy.Validator.
+func (g *GeoCity) Validate() error {
+	if len(g.allKeywords) == 0 {
+		return fmt.Errorf("geocity matcher: at least one region, province, or city keyword must be specified")
+	}
 	return nil
 }
 
