@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.8.0] - 2026-05-18
+
+### Added
+- GeoCity regions 支持 AND 匹配：用 `+` 连接关键词表示同时包含（如 `"河北+联通"`），多个关键词之间仍为 OR 关系
+- GeoCity matcher 添加 caddy.Validator 接口，要求至少配置一个 region 关键词
+
+### Changed
+- 移除 singleflight，mmdb/xdb 查询为纯内存操作，直接在 RLock 下查询性能更优
+- 移除全局 downloadLocks map，各 App 下载已通过生命周期串行化
+- 升级 caddy/v2 从 v2.11.1 到 v2.11.3
+- 升级 go.uber.org/zap 从 v1.27.1 到 v1.28.0
+- 升级 go.opentelemetry.io/otel 从 v1.40.0 到 v1.41.0
+
+### Removed
+- 移除已废弃的 `provinces` 和 `cities` 配置字段，统一使用 `regions`
+
+### Fixed
+- 修复 stale temp 文件导致数据库更新永久跳过的 bug
+- 修复 Cache.Cleanup Phase 2 使用过期时间戳可能误删刚更新条目的问题
+- 修复 copyFile 失败时未清理不完整目标文件的问题
+
 ## [v1.7.0] - 2026-02-25
 
 ### Changed
