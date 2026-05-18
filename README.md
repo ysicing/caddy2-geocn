@@ -169,8 +169,6 @@ province.example.com {
 
 配置项：
 - `regions`：地区关键词列表，在整个 region 字符串中搜索匹配
-- `provinces`：省份列表（已废弃，建议使用 regions）
-- `cities`：城市列表（已废弃，建议使用 regions）
 - `ipv4_source`：IPv4 数据库源（HTTP URL 或本地文件）
 - `ipv6_source`：IPv6 数据库源（HTTP URL 或本地文件）
 - `interval`：更新检查间隔（默认 `24h`，仅对 HTTP 源生效）
