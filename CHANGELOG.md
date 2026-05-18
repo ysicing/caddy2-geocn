@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.8.1] - 2026-05-18
+
+### Changed
+- 简化 downloadFile 临时文件清理逻辑，移除双标志位模式，改用 defer 统一清理
+- lookupRegion/lookupCountry 显式释放读锁，缩短锁持有时间，避免在 cache 写入期间持锁
+- GeoCity.Provision 简化 allKeywords 初始化为直接 slice 赋值
+- GeoCity.Match 简化为单行短路布尔表达式
+
 ## [v1.8.0] - 2026-05-18
 
 ### Added

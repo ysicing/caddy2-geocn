@@ -385,22 +385,17 @@ func (app *GeoCityApp) lookupRegion(host string) string {
 	}
 
 	app.lock.RLock()
-	defer app.lock.RUnlock()
-
-	var searcher *xdb.Searcher
+	searcher := app.searcherIPv6
 	if nip.Is4() || nip.Is4In6() {
 		searcher = app.searcherIPv4
-		if searcher == nil {
-			return ""
-		}
-	} else {
-		searcher = app.searcherIPv6
-		if searcher == nil {
-			return ""
-		}
 	}
-
+	if searcher == nil {
+		app.lock.RUnlock()
+		return ""
+	}
 	region, err := searcher.SearchByStr(host)
+	app.lock.RUnlock()
+
 	if err != nil {
 		app.logger.Debug("failed to search IP location", zap.String("ip", host), zap.Error(err))
 		return ""
@@ -417,9 +412,7 @@ func (app *GeoCityApp) lookupRegion(host string) string {
 
 func (g *GeoCity) Provision(ctx caddy.Context) error {
 	g.logger = ctx.Logger()
-
-	g.allKeywords = make([]string, 0, len(g.Regions))
-	g.allKeywords = append(g.allKeywords, g.Regions...)
+	g.allKeywords = g.Regions
 
 	appModule, err := ctx.App("geocity")
 	if err != nil {
@@ -510,17 +503,9 @@ func (g *GeoCity) Match(r *http.Request) bool {
 		return false
 	}
 
-	// Lookup region, then match locally per-matcher config
 	region := g.app.lookupRegion(host)
-
-	var matched bool
-	if region == "" {
-		matched = false
-	} else {
-		country, _, _ := strings.Cut(region, "|")
-		country = strings.TrimSpace(country)
-		matched = country == "中国" && g.matchRegion(region)
-	}
+	country, _, _ := strings.Cut(region, "|")
+	matched := region != "" && strings.TrimSpace(country) == "中国" && g.matchRegion(region)
 
 	g.logger.Debug("geocity match result",
 		zap.String("client_ip", raw),

@@ -332,13 +332,13 @@ func (app *GeoCNApp) lookupCountry(host string) string {
 	}
 
 	app.lock.RLock()
-	defer app.lock.RUnlock()
-
 	if app.dbReader == nil {
+		app.lock.RUnlock()
 		return ""
 	}
-
 	record, err := app.dbReader.Country(nip)
+	app.lock.RUnlock()
+
 	if err != nil || record == nil || !record.HasData() {
 		return ""
 	}

@@ -88,38 +88,32 @@ func downloadFile(ctx context.Context, client *http.Client, remoteURL, localFile
 	}
 	tempFile := out.Name()
 
-	var success bool
-	var closed bool
 	defer func() {
-		if !success {
-			if !closed {
-				out.Close()
-			}
-			os.Remove(tempFile)
-		}
+		// On any failure path, clean up the temp file.
+		// os.Remove is safe to call even if the file was already renamed.
+		os.Remove(tempFile)
 	}()
 
 	if _, err = io.Copy(out, resp.Body); err != nil {
+		out.Close()
 		return fmt.Errorf("writing file: %w", err)
 	}
 
 	if err = out.Sync(); err != nil {
+		out.Close()
 		return fmt.Errorf("syncing file: %w", err)
 	}
 
 	// Close before rename to release the file handle
 	if err = out.Close(); err != nil {
-		closed = true
 		return fmt.Errorf("closing temp file: %w", err)
 	}
-	closed = true
 
 	// Atomically move to target location
 	if err = os.Rename(tempFile, localFile); err != nil {
 		return fmt.Errorf("moving file: %w", err)
 	}
 
-	success = true
 	return nil
 }
 
