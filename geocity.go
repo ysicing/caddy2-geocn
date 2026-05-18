@@ -67,13 +67,11 @@ type GeoCityApp struct {
 
 // GeoCity is a lightweight matcher that references the global GeoCityApp.
 type GeoCity struct {
-	Regions   []string `json:"regions,omitempty"`
-	Provinces []string `json:"provinces,omitempty"` // Deprecated: use Regions instead
-	Cities    []string `json:"cities,omitempty"`    // Deprecated: use Regions instead
+	Regions []string `json:"regions,omitempty"`
 
 	app         *GeoCityApp
 	logger      *zap.Logger
-	allKeywords []string // pre-merged keywords from Regions+Provinces+Cities
+	allKeywords []string
 }
 
 // cityCache is a TTL cache for IP region lookups.
@@ -420,18 +418,8 @@ func (app *GeoCityApp) lookupRegion(host string) string {
 func (g *GeoCity) Provision(ctx caddy.Context) error {
 	g.logger = ctx.Logger()
 
-	if len(g.Provinces) > 0 {
-		g.logger.Warn("'provinces' is deprecated, use 'regions' instead")
-	}
-	if len(g.Cities) > 0 {
-		g.logger.Warn("'cities' is deprecated, use 'regions' instead")
-	}
-
-	// Pre-merge all keywords to avoid per-request allocation
-	g.allKeywords = make([]string, 0, len(g.Regions)+len(g.Provinces)+len(g.Cities))
+	g.allKeywords = make([]string, 0, len(g.Regions))
 	g.allKeywords = append(g.allKeywords, g.Regions...)
-	g.allKeywords = append(g.allKeywords, g.Provinces...)
-	g.allKeywords = append(g.allKeywords, g.Cities...)
 
 	appModule, err := ctx.App("geocity")
 	if err != nil {
@@ -459,8 +447,6 @@ func (g *GeoCity) Validate() error {
 //
 //	geocity {
 //	    regions       <keyword> [<keyword>...]
-//	    provinces     <keyword> [<keyword>...]
-//	    cities        <keyword> [<keyword>...]
 //	}
 func (g *GeoCity) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	for d.Next() {
@@ -472,18 +458,6 @@ func (g *GeoCity) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				g.Regions = append(g.Regions, args...)
-			case "provinces":
-				args := d.RemainingArgs()
-				if len(args) == 0 {
-					return d.ArgErr()
-				}
-				g.Provinces = append(g.Provinces, args...)
-			case "cities":
-				args := d.RemainingArgs()
-				if len(args) == 0 {
-					return d.ArgErr()
-				}
-				g.Cities = append(g.Cities, args...)
 			default:
 				return d.ArgErr()
 			}
