@@ -185,6 +185,36 @@ func TestGeoCityUpdateDatabaseReplacesSearcher(t *testing.T) {
 	})
 }
 
+func TestGeoCityMatchRegion(t *testing.T) {
+	tests := []struct {
+		name     string
+		keywords []string
+		region   string
+		want     bool
+	}{
+		{"single keyword match", []string{"河北"}, "中国|0|河北省|石家庄市|联通", true},
+		{"single keyword no match", []string{"广东"}, "中国|0|河北省|石家庄市|联通", false},
+		{"OR match first", []string{"河北", "广东"}, "中国|0|河北省|石家庄市|联通", true},
+		{"OR match second", []string{"广东", "联通"}, "中国|0|河北省|石家庄市|联通", true},
+		{"OR no match", []string{"广东", "电信"}, "中国|0|河北省|石家庄市|联通", false},
+		{"AND match", []string{"河北+联通"}, "中国|0|河北省|石家庄市|联通", true},
+		{"AND partial no match", []string{"河北+电信"}, "中国|0|河北省|石家庄市|联通", false},
+		{"AND all no match", []string{"广东+电信"}, "中国|0|河北省|石家庄市|联通", false},
+		{"mixed AND+OR", []string{"广东+电信", "河北"}, "中国|0|河北省|石家庄市|联通", true},
+		{"empty keywords match all", []string{}, "中国|0|河北省|石家庄市|联通", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := &GeoCity{allKeywords: tt.keywords}
+			got := g.matchRegion(tt.region)
+			if got != tt.want {
+				t.Errorf("matchRegion(%q) = %v, want %v", tt.region, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDownloadFileRejectsInvalidTLS(t *testing.T) {
 	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

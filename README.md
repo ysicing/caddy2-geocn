@@ -168,7 +168,7 @@ province.example.com {
 - IP 获取：优先使用 Caddy 的 `ClientIPVarKey`（需配置 `trusted_proxies`），回退到 `RemoteAddr`
 
 配置项：
-- `regions`：地区关键词列表，在整个 region 字符串中搜索匹配
+- `regions`：地区关键词列表，多个关键词为 OR 关系；用 `+` 连接表示 AND（如 `"河北+联通"` 表示同时包含河北和联通）
 - `ipv4_source`：IPv4 数据库源（HTTP URL 或本地文件）
 - `ipv6_source`：IPv6 数据库源（HTTP URL 或本地文件）
 - `interval`：更新检查间隔（默认 `24h`，仅对 HTTP 源生效）
@@ -196,10 +196,24 @@ geocity {
 
 常见用法：
 
-- 允许部分省市访问：
+- 允许部分省市访问（OR 关系）：
 ```caddyfile
 geocity {
     regions "广东" "浙江" "北京" "上海"
+}
+```
+
+- 精确匹配省份+运营商（AND 关系，用 `+` 连接）：
+```caddyfile
+geocity {
+    regions "河北+联通"
+}
+```
+
+- 混合使用（河北联通 OR 北京）：
+```caddyfile
+geocity {
+    regions "河北+联通" "北京"
 }
 ```
 

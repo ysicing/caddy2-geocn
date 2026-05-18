@@ -466,15 +466,28 @@ func (g *GeoCity) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	return nil
 }
 
-// matchRegion checks if the region string contains any of the configured keywords.
-// It searches in the full region string (e.g., "中国|0|北京|北京市|联通").
+// matchRegion checks if the region string matches any of the configured keywords.
+// A keyword containing "+" requires all parts to be present (AND logic).
+// Multiple keywords are OR'd together.
 func (g *GeoCity) matchRegion(region string) bool {
 	if len(g.allKeywords) == 0 {
-		return true // No filter configured, match all Chinese IPs
+		return true
 	}
 
 	for _, kw := range g.allKeywords {
-		if strings.Contains(region, kw) {
+		if strings.Contains(kw, "+") {
+			parts := strings.Split(kw, "+")
+			allMatch := true
+			for _, p := range parts {
+				if p != "" && !strings.Contains(region, p) {
+					allMatch = false
+					break
+				}
+			}
+			if allMatch {
+				return true
+			}
+		} else if strings.Contains(region, kw) {
 			return true
 		}
 	}
