@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.8.2] - 2026-10-09
+
+### Fixed
+- 修复 geocity 共享 xdb.Searcher 的 ioCount 并发写入，查询时复制轻量查询器并共享只读数据库缓冲
+- 使用字节参数调用 ip2region Search，兼容原有依赖及新版 API，并复用已解析的 IP
+- 缓存成功查询但数据库无数据的空结果，遵循现有容量和 TTL；查询错误不缓存
+
+### Changed
+- Debug 日志先判断是否输出，再构建字段，消除关闭 Debug 时的日志字段分配
+- 地区规则在初始化时拆分，保留 OR 与 + 连接条件的 AND 匹配语义
+- 优化纯 IP 提取，避免正常 ClientIP 走地址拆分的错误分配路径
+- 升级 Go 版本要求至 1.26.0、Caddy 至 v2.11.7、geoip2-golang/v2 至 v2.4.0，并同步相关依赖和 GitHub Actions 版本
+
+### Added
+- 添加 IPv4/IPv6 并发查询、空结果缓存、IP 提取回归测试及完整 matcher 微基准
+
 ## [v1.8.1] - 2026-05-18
 
 ### Changed
