@@ -339,12 +339,16 @@ func (app *GeoCNApp) lookupCountry(host string) string {
 	record, err := app.dbReader.Country(nip)
 	app.lock.RUnlock()
 
-	if err != nil || record == nil || !record.HasData() {
+	if err != nil {
 		return ""
 	}
 
-	country := record.Country.ISOCode
-	if app.cache != nil && country != "" {
+	var country string
+	if record != nil && record.HasData() {
+		country = record.Country.ISOCode
+	}
+	// 成功但无数据的结果也按 TTL 缓存；查询错误不缓存。
+	if app.cache != nil {
 		app.cache.Set(host, country)
 	}
 
@@ -397,10 +401,12 @@ func (m *GeoCN) Match(r *http.Request) bool {
 	country := m.app.lookupCountry(host)
 	matched := country == "CN"
 
-	m.logger.Debug("geocn match result",
-		zap.String("client_ip", raw),
-		zap.String("country", country),
-		zap.Bool("is_cn", matched))
+	if ce := m.logger.Check(zap.DebugLevel, "geocn match result"); ce != nil {
+		ce.Write(
+			zap.String("client_ip", raw),
+			zap.String("country", country),
+			zap.Bool("is_cn", matched))
+	}
 
 	return matched
 }

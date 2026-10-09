@@ -106,6 +106,7 @@ site2.example.com {
   - TTL：5m（`cache ttl 5m` 可调整）
   - 容量：10000（`cache size 10000` 可调整）
   - 关闭：Caddyfile 中使用 `cache off`，或 JSON 使用 `enable_cache: false`
+  - 成功查询但数据库无数据时，也缓存空结果并遵循相同 TTL；查询错误不缓存
 
 - 更新策略
   - 默认每 24 小时检查更新（`interval 24h` 可调整）

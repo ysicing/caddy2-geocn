@@ -20,6 +20,11 @@ import (
 
 // getHost extracts the host part from an address string (may be IP or host:port).
 func getHost(s string) string {
+	s = strings.TrimSpace(s)
+	// 纯 IPv4/主机名及未加方括号的 IPv6 不含端口，避免错误对象分配。
+	if !strings.Contains(s, ":") || (strings.Count(s, ":") > 1 && !strings.HasPrefix(s, "[")) {
+		return s
+	}
 	host, _, err := net.SplitHostPort(s)
 	if err != nil {
 		host = s

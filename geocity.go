@@ -71,7 +71,7 @@ type GeoCity struct {
 
 	app         *GeoCityApp
 	logger      *zap.Logger
-	allKeywords []string
+	allKeywords [][]string
 }
 
 // cityCache is a TTL cache for IP region lookups.
@@ -393,15 +393,21 @@ func (app *GeoCityApp) lookupRegion(host string) string {
 		app.lock.RUnlock()
 		return ""
 	}
-	region, err := searcher.SearchByStr(host)
+	// 仅适用于 NewWithBuffer：缓冲区只读共享，复制查询器隔离可变 ioCount。
+	// 保持读锁到查询结束，避免更新或 Cleanup 与查询交错。
+	query := *searcher
+	region, err := query.Search(nip.Unmap().AsSlice())
 	app.lock.RUnlock()
 
 	if err != nil {
-		app.logger.Debug("failed to search IP location", zap.String("ip", host), zap.Error(err))
+		if ce := app.logger.Check(zap.DebugLevel, "failed to search IP location"); ce != nil {
+			ce.Write(zap.String("ip", host), zap.Error(err))
+		}
 		return ""
 	}
 
-	if app.cache != nil && region != "" {
+	// 与国家查询一致，只缓存成功结果（包括空结果）。
+	if app.cache != nil {
 		app.cache.Set(host, region)
 	}
 
@@ -412,7 +418,10 @@ func (app *GeoCityApp) lookupRegion(host string) string {
 
 func (g *GeoCity) Provision(ctx caddy.Context) error {
 	g.logger = ctx.Logger()
-	g.allKeywords = g.Regions
+	g.allKeywords = make([][]string, len(g.Regions))
+	for i, keyword := range g.Regions {
+		g.allKeywords[i] = strings.Split(keyword, "+")
+	}
 
 	appModule, err := ctx.App("geocity")
 	if err != nil {
@@ -467,20 +476,15 @@ func (g *GeoCity) matchRegion(region string) bool {
 		return true
 	}
 
-	for _, kw := range g.allKeywords {
-		if strings.Contains(kw, "+") {
-			parts := strings.Split(kw, "+")
-			allMatch := true
-			for _, p := range parts {
-				if p != "" && !strings.Contains(region, p) {
-					allMatch = false
-					break
-				}
+	for _, parts := range g.allKeywords {
+		allMatch := true
+		for _, part := range parts {
+			if part != "" && !strings.Contains(region, part) {
+				allMatch = false
+				break
 			}
-			if allMatch {
-				return true
-			}
-		} else if strings.Contains(region, kw) {
+		}
+		if allMatch {
 			return true
 		}
 	}
@@ -507,10 +511,12 @@ func (g *GeoCity) Match(r *http.Request) bool {
 	country, _, _ := strings.Cut(region, "|")
 	matched := region != "" && strings.TrimSpace(country) == "中国" && g.matchRegion(region)
 
-	g.logger.Debug("geocity match result",
-		zap.String("client_ip", raw),
-		zap.String("region", region),
-		zap.Bool("matched", matched))
+	if ce := g.logger.Check(zap.DebugLevel, "geocity match result"); ce != nil {
+		ce.Write(
+			zap.String("client_ip", raw),
+			zap.String("region", region),
+			zap.Bool("matched", matched))
+	}
 
 	return matched
 }

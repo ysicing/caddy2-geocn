@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -170,11 +171,12 @@ func TestGeoCityUpdateDatabaseReplacesSearcher(t *testing.T) {
 		t.Fatal("expected searcherIPv4 to be replaced")
 	}
 
-	if _, err := module.searcherIPv4.SearchByStr("1.1.1.1"); err != nil {
+	ip := netip.MustParseAddr("1.1.1.1").AsSlice()
+	if _, err := module.searcherIPv4.Search(ip); err != nil {
 		t.Fatalf("new searcher lookup failed: %v", err)
 	}
 
-	if _, err := initialSearcher.SearchByStr("1.1.1.1"); err == nil {
+	if _, err := initialSearcher.Search(ip); err == nil {
 		t.Fatalf("expected old searcher to report an error after update")
 	}
 
@@ -202,11 +204,17 @@ func TestGeoCityMatchRegion(t *testing.T) {
 		{"AND all no match", []string{"广东+电信"}, "中国|0|河北省|石家庄市|联通", false},
 		{"mixed AND+OR", []string{"广东+电信", "河北"}, "中国|0|河北省|石家庄市|联通", true},
 		{"empty keywords match all", []string{}, "中国|0|河北省|石家庄市|联通", true},
+		{"empty AND parts ignored", []string{"+河北++联通+"}, "中国|0|河北省|石家庄市|联通", true},
+		{"only separators match all", []string{"++"}, "中国|0|河北省|石家庄市|联通", true},
+		{"empty keyword matches all", []string{""}, "中国|0|河北省|石家庄市|联通", true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			g := &GeoCity{allKeywords: tt.keywords}
+			g := &GeoCity{}
+			for _, keyword := range tt.keywords {
+				g.allKeywords = append(g.allKeywords, strings.Split(keyword, "+"))
+			}
 			got := g.matchRegion(tt.region)
 			if got != tt.want {
 				t.Errorf("matchRegion(%q) = %v, want %v", tt.region, got, tt.want)
